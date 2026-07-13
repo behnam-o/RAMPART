@@ -126,6 +126,7 @@ class RampartSession:
         self._incomplete: bool = False
         self._incomplete_reasons: list[str] = []
         self._report_metadata: dict[str, object] = {}
+        self._has_non_trial_failures: bool = False
 
     @property
     def sinks(self) -> list[ReportSink]:
@@ -153,6 +154,15 @@ class RampartSession:
     def incomplete_reasons(self) -> list[str]:
         """The recorded reasons the run is incomplete (empty if complete)."""
         return list(self._incomplete_reasons)
+
+    @property
+    def has_non_trial_failures(self) -> bool:
+        """True if any non-trial test failed during the run.
+
+        Tracked so the trial gate never clears an exit status that a
+        real, unrelated failure earned.
+        """
+        return self._has_non_trial_failures
 
     def add_sinks(self, *, sinks: list[ReportSink]) -> None:
         """Register additional sinks for report emission.
@@ -387,6 +397,16 @@ class RampartSession:
         self._incomplete = True
         self._incomplete_reasons.append(reason)
         self._cached_report = None
+
+    def mark_non_trial_failure(self) -> None:
+        """Record that a non-trial test failed.
+
+        Set from ``pytest_runtest_makereport`` for any failing item that
+        is not a trial clone, and merged from xdist workers. Prevents the
+        trial gate from clearing an exit status earned by an unrelated
+        failure.
+        """
+        self._has_non_trial_failures = True
 
     def set_report_metadata(self, *, metadata: dict[str, object]) -> None:
         """Attach run-level metadata that will appear on ``TestRunReport``.

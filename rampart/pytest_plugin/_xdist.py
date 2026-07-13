@@ -520,6 +520,7 @@ def serialize_worker_data(*, session: RampartSession) -> dict[str, Any]:
     return {
         "schema": SCHEMA_VERSION,
         "results_by_nodeid": serialized,
+        "has_non_trial_failures": session.has_non_trial_failures,
         "trial_specs": [
             {
                 "clone_nodeid": clone_nodeid,
@@ -1215,6 +1216,10 @@ def handle_testnodedown(
     session.merge_worker_results(results_by_nodeid=results_by_nodeid)
     if trial_specs:
         session.merge_trial_specs(trial_specs=trial_specs)
+    if typed_payload_dict is not None and typed_payload_dict.get(
+        "has_non_trial_failures",
+    ):
+        session.mark_non_trial_failure()
     logger.info(
         "Merged %d result group(s) from worker %s.",
         len(results_by_nodeid),

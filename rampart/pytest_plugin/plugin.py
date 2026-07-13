@@ -68,6 +68,7 @@ __all__ = [
     "pytest_addoption",
     "pytest_collection_modifyitems",
     "pytest_configure",
+    "pytest_runtest_makereport",
     "pytest_sessionfinish",
     "pytest_terminal_summary",
     "pytest_testnodedown",
@@ -76,6 +77,7 @@ __all__ = [
 
 _rampart_key = pytest.StashKey[RampartSession]()
 _session_start_key = pytest.StashKey[float]()
+_collector_key = pytest.StashKey[ResultCollector]()
 
 # Module-level constants are an acceptable exception in a hook-based
 # plugin module where there is no natural owning class.
@@ -387,6 +389,79 @@ def pytest_collection_modifyitems(
             )
 
 
+def _synthesize_trial_result(*, call: pytest.CallInfo[Any]) -> Result:
+    """Derive a Result from a trial clone's pass/fail outcome.
+
+    Lets ``@trial`` tests rely on plain ``assert`` statements instead of
+    calling ``record_result``: a passing clone becomes SAFE, an assertion
+    miss becomes UNDETERMINED (counts against the pass rate without the
+    unconditional UNSAFE fail, so ``threshold`` governs), and any other
+    exception becomes ERROR.
+
+    Args:
+        call (pytest.CallInfo[Any]): The call-phase information.
+
+    Returns:
+        Result: The synthesized result for the clone.
+    """
+    if call.excinfo is None:
+        return Result(
+            safe=True,
+            status=SafetyStatus.SAFE,
+            summary="trial passed",
+        )
+    if call.excinfo.errisinstance(AssertionError):
+        return Result(
+            safe=False,
+            status=SafetyStatus.UNDETERMINED,
+            summary=f"trial assertion failed: {call.excinfo.exconly()}",
+        )
+    return Result(
+        safe=False,
+        status=SafetyStatus.ERROR,
+        summary=f"trial raised {call.excinfo.typename}: {call.excinfo.exconly()}",
+    )
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(
+    item: pytest.Item,
+    call: pytest.CallInfo[Any],
+) -> Generator[None, None, None]:
+    """Record trial outcomes without mutating pytest's own report.
+
+    pytest reports each test's pass/fail exactly as it happened; RAMPART
+    never rewrites the report, so terminal output and per-test counts stay
+    truthful. Two things happen here:
+
+    - For ``@trial`` clones that recorded nothing, a Result is synthesized
+      from the call outcome so tests can use plain ``assert`` without
+      ``record_result``. The aggregate threshold gate in
+      ``pytest_sessionfinish`` owns the final exit status.
+    - A non-trial failure is flagged on the session so the trial gate can
+      never clear an exit status that a real, unrelated failure earned.
+
+    Args:
+        item (pytest.Item): The test item being reported.
+        call (pytest.CallInfo[Any]): The call-phase information.
+    """
+    outcome = yield
+    report = cast("pytest.TestReport", outcome.get_result())
+    rampart_session = item.config.stash.get(_rampart_key, None)
+
+    if getattr(item, "_rampart_trial_base", None) is None:
+        if report.failed and rampart_session is not None:
+            rampart_session.mark_non_trial_failure()
+        return
+
+    if report.when != "call":
+        return
+
+    collector = item.stash.get(_collector_key, None)
+    if collector is not None and not collector.results:
+        collector.record(result=_synthesize_trial_result(call=call))
+
+
 def _absorb_results(
     *,
     rampart_session: RampartSession,
@@ -434,6 +509,7 @@ def _rampart_collect(  # pytest discovers this via autouse=True
     collector = ResultCollector()
     node = cast("pytest.Item", request.node)
     rampart_session = request.config.stash.get(_rampart_key, None)
+    node.stash[_collector_key] = collector
     token = activate_collector(collector)
     yield
     deactivate_collector(token)
@@ -650,6 +726,54 @@ def _evaluate_gates(
             )
 
 
+def _enforce_trial_gate_exit_status(
+    *,
+    session: pytest.Session,
+    rampart_session: RampartSession,
+) -> None:
+    """Make the trial gate the authority on trial-only exit status.
+
+    pytest reports every clone truthfully (RAMPART does not rewrite
+    reports), so this hook reconciles the exit status with the aggregate
+    verdict:
+
+    - A group that misses its threshold forces a non-zero exit.
+    - A fully passing set of trial groups clears the non-zero exit status
+      that downgraded assert-misses earned, so a run whose only red marks
+      are acceptable trial misses exits zero.
+
+    Real signals are never masked: a non-trial failure or a genuine error
+    inside a trial clone keeps the run red.
+
+    Args:
+        session (pytest.Session): The active pytest session.
+        rampart_session (RampartSession): The merged RAMPART session state.
+    """
+    groups = rampart_session.trial_groups
+    if not groups:
+        return
+
+    if not all(group.passed for group in groups.values()):
+        if session.exitstatus == pytest.ExitCode.OK:
+            session.exitstatus = pytest.ExitCode.TESTS_FAILED
+            logger.warning(
+                "RAMPART trial gate failed; forcing non-zero exit status.",
+            )
+        return
+
+    if session.exitstatus != pytest.ExitCode.TESTS_FAILED:
+        return
+    if rampart_session.has_non_trial_failures:
+        return
+    if any(group.errors > 0 for group in groups.values()):
+        return
+
+    session.exitstatus = pytest.ExitCode.OK
+    logger.info(
+        "RAMPART trial gate passed; clearing exit status set by trial misses.",
+    )
+
+
 def _enforce_incomplete_exit_status(
     *,
     session: pytest.Session,
@@ -718,6 +842,10 @@ def pytest_sessionfinish(
 
     _aggregate_trial_results(rampart_session=rampart_session)
     _evaluate_gates(rampart_session=rampart_session)
+    _enforce_trial_gate_exit_status(
+        session=session,
+        rampart_session=rampart_session,
+    )
     _enforce_incomplete_exit_status(session=session, rampart_session=rampart_session)
 
     if is_xdist_controller(config=session.config):
@@ -966,6 +1094,14 @@ def pytest_terminal_summary(
         terminalreporter=terminalreporter,
         rampart_session=rampart_session,
     )
+
+    trial_groups = rampart_session.trial_groups
+    if trial_groups:
+        passed = sum(1 for group in trial_groups.values() if group.passed)
+        terminalreporter.write_line(
+            f"\nRAMPART Trials: {len(trial_groups)} unique test(s), "
+            f"{passed}/{len(trial_groups)} passed their threshold.",
+        )
 
     stats = report.population_summary()
     if stats.total_runs > 0:
