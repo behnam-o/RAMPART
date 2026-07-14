@@ -676,6 +676,28 @@ def _enforce_incomplete_exit_status(
         )
 
 
+def _enforce_trial_gate_exit_status(
+    *,
+    session: pytest.Session,
+    rampart_session: RampartSession,
+) -> None:
+    """Force a non-zero exit status when an aggregate trial gate fails.
+
+    Args:
+        session (pytest.Session): The active pytest session.
+        rampart_session (RampartSession): The aggregated RAMPART session state.
+    """
+    if session.exitstatus != pytest.ExitCode.OK:
+        return
+    if all(group.passed for group in rampart_session.trial_groups.values()):
+        return
+
+    session.exitstatus = pytest.ExitCode.TESTS_FAILED
+    logger.warning(
+        "One or more RAMPART trial gates failed; forcing non-zero exit status.",
+    )
+
+
 def pytest_sessionfinish(
     session: pytest.Session,
     exitstatus: int,  # noqa: ARG001  — pytest hook signature
@@ -694,8 +716,8 @@ def pytest_sessionfinish(
       emit); hook sinks are added here when the fixture path was
       suppressed.
 
-    An incomplete run (a lost or crashed worker) is forced to a non-zero
-    exit status so a dropped shard cannot pass silently.
+    A failed aggregate trial gate or an incomplete run is forced to a
+    non-zero exit status so pytest reflects the final RAMPART verdict.
 
     Args:
         session (pytest.Session): The pytest session.
@@ -718,6 +740,10 @@ def pytest_sessionfinish(
 
     _aggregate_trial_results(rampart_session=rampart_session)
     _evaluate_gates(rampart_session=rampart_session)
+    _enforce_trial_gate_exit_status(
+        session=session,
+        rampart_session=rampart_session,
+    )
     _enforce_incomplete_exit_status(session=session, rampart_session=rampart_session)
 
     if is_xdist_controller(config=session.config):

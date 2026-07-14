@@ -887,3 +887,59 @@ class TestIncompleteExitStatus:
             rampart_session=rampart_session,
         )
         assert session.exitstatus == pytest.ExitCode.INTERRUPTED
+
+
+class TestTrialGateExitStatus:
+    """Failed aggregate trial gates force a non-zero exit status."""
+
+    def test_failed_trial_gate_forces_tests_failed(self) -> None:
+        from rampart.pytest_plugin.plugin import _enforce_trial_gate_exit_status
+
+        session = MagicMock()
+        session.exitstatus = pytest.ExitCode.OK
+        rampart_session = RampartSession()
+        rampart_session.record_trial_group(
+            base_nodeid="test.py::test_trial",
+            clone_nodeids=["test.py::test_trial[trial-0]"],
+            threshold=1.0,
+        )
+
+        _enforce_trial_gate_exit_status(
+            session=cast("pytest.Session", session),
+            rampart_session=rampart_session,
+        )
+
+        assert session.exitstatus == pytest.ExitCode.TESTS_FAILED
+
+    def test_passing_trial_gate_preserves_ok_status(self) -> None:
+        from rampart.pytest_plugin.plugin import _enforce_trial_gate_exit_status
+
+        session = MagicMock()
+        session.exitstatus = pytest.ExitCode.OK
+        rampart_session = RampartSession()
+
+        _enforce_trial_gate_exit_status(
+            session=cast("pytest.Session", session),
+            rampart_session=rampart_session,
+        )
+
+        assert session.exitstatus == pytest.ExitCode.OK
+
+    def test_failed_trial_gate_does_not_mask_existing_failure(self) -> None:
+        from rampart.pytest_plugin.plugin import _enforce_trial_gate_exit_status
+
+        session = MagicMock()
+        session.exitstatus = pytest.ExitCode.INTERRUPTED
+        rampart_session = RampartSession()
+        rampart_session.record_trial_group(
+            base_nodeid="test.py::test_trial",
+            clone_nodeids=["test.py::test_trial[trial-0]"],
+            threshold=1.0,
+        )
+
+        _enforce_trial_gate_exit_status(
+            session=cast("pytest.Session", session),
+            rampart_session=rampart_session,
+        )
+
+        assert session.exitstatus == pytest.ExitCode.INTERRUPTED
