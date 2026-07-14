@@ -68,6 +68,7 @@ __all__ = [
     "pytest_addoption",
     "pytest_collection_modifyitems",
     "pytest_configure",
+    "pytest_runtest_makereport",
     "pytest_sessionfinish",
     "pytest_terminal_summary",
     "pytest_testnodedown",
@@ -76,6 +77,7 @@ __all__ = [
 
 _rampart_key = pytest.StashKey[RampartSession]()
 _session_start_key = pytest.StashKey[float]()
+_collector_key = pytest.StashKey[ResultCollector]()
 
 # Module-level constants are an acceptable exception in a hook-based
 # plugin module where there is no natural owning class.
@@ -413,6 +415,81 @@ def _absorb_results(
         )
 
 
+def _record_missing_trial_result(
+    *,
+    collector: ResultCollector,
+    call: pytest.CallInfo[None],
+) -> None:
+    """Record a synthetic result when a trial did not produce one.
+
+    Args:
+        collector (ResultCollector): The active trial result collector.
+        call (pytest.CallInfo[None]): The completed pytest call phase.
+    """
+    if collector.results:
+        return
+
+    if call.excinfo is None:
+        result = Result(
+            safe=True,
+            status=SafetyStatus.SAFE,
+            summary="Trial completed without recording a Result.",
+        )
+    else:
+        summary = str(call.excinfo.value) or "Trial assertion did not pass."
+        result = Result(
+            safe=False,
+            status=SafetyStatus.UNDETERMINED,
+            summary=summary,
+        )
+    collector.record(result=result)
+
+
+@pytest.hookimpl(wrapper=True, tryfirst=True)
+def pytest_runtest_makereport(
+    item: pytest.Item,
+    call: pytest.CallInfo[None],
+) -> Generator[None, pytest.TestReport, pytest.TestReport]:
+    """Treat call-phase assertions in trial clones as trial outcomes.
+
+    A trial assertion is an observation used by the aggregate threshold,
+    not an individual pytest failure. Assertions without an explicitly
+    recorded result synthesize SAFE or UNDETERMINED results. Failures from
+    other exceptions and from setup or teardown retain normal pytest
+    semantics.
+
+    Args:
+        item (pytest.Item): The pytest item being reported.
+        call (pytest.CallInfo[None]): Information about the completed phase.
+
+    Returns:
+        pytest.TestReport: The original or adjusted test report.
+    """
+    report = yield
+    if report.when != "call" or item.get_closest_marker("trial") is None:
+        return report
+
+    collector = item.stash.get(_collector_key, None)
+    if collector is None:
+        return report
+
+    if report.passed:
+        _record_missing_trial_result(collector=collector, call=call)
+        return report
+
+    if (
+        not report.failed
+        or call.excinfo is None
+        or not call.excinfo.errisinstance(AssertionError)
+    ):
+        return report
+
+    _record_missing_trial_result(collector=collector, call=call)
+    report.outcome = "passed"
+    report.longrepr = None
+    return report
+
+
 @pytest.fixture(autouse=True)
 def _rampart_collect(  # pytest discovers this via autouse=True
     request: pytest.FixtureRequest,
@@ -435,10 +512,18 @@ def _rampart_collect(  # pytest discovers this via autouse=True
     node = cast("pytest.Item", request.node)
     rampart_session = request.config.stash.get(_rampart_key, None)
     token = activate_collector(collector)
-    yield
-    deactivate_collector(token)
-    if rampart_session is not None:
-        _absorb_results(rampart_session=rampart_session, node=node, collector=collector)
+    node.stash[_collector_key] = collector
+    try:
+        yield
+    finally:
+        deactivate_collector(token)
+        if rampart_session is not None:
+            _absorb_results(
+                rampart_session=rampart_session,
+                node=node,
+                collector=collector,
+            )
+        del node.stash[_collector_key]
 
     # Note: collector.results returns a copy of the internal list,
     # so reading it after deactivation and absorption is safe.

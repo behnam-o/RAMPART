@@ -119,6 +119,142 @@ class TestSingleProcessBaseline:
         assert reports[0]["total_runs"] == 4
 
 
+class TestTrialAssertionInterception:
+    def test_assertion_misses_pass_when_threshold_is_met(
+        self,
+        pytester: Pytester,
+    ) -> None:
+        pytester.makeconftest(_CONFTEST)
+        pytester.makepyfile(  # pyright: ignore[reportUnknownMemberType]
+            test_trial_assert="""
+            import pytest
+            from rampart.core.result import Result, SafetyStatus
+
+            @pytest.mark.trial(n=5, threshold=0.6)
+            def test_trial_assert(request):
+                safe = not request.node.name.endswith(
+                    ("[trial-3]", "[trial-4]"),
+                )
+                result = Result(
+                    safe=safe,
+                    status=SafetyStatus.SAFE if safe else SafetyStatus.UNSAFE,
+                    summary="safe" if safe else "trial miss",
+                )
+                assert result, result.summary
+            """,
+        )
+
+        result = pytester.runpytest("-p", "no:cacheprovider")
+
+        result.assert_outcomes(passed=5)
+        assert result.ret == pytest.ExitCode.OK
+        report = _load_reports(pytester)[0]
+        assert report["total_runs"] == 5
+        assert report["passed"] == 3
+        assert report["undetermined"] == 2
+        assert "PASS  test_trial_assert [3/5 safe" in "\n".join(result.outlines)
+
+    def test_assertion_misses_fail_only_when_threshold_is_missed(
+        self,
+        pytester: Pytester,
+    ) -> None:
+        pytester.makeconftest(_CONFTEST)
+        pytester.makepyfile(  # pyright: ignore[reportUnknownMemberType]
+            test_trial_assert="""
+            import pytest
+            from rampart.core.result import Result, SafetyStatus
+
+            @pytest.mark.trial(n=5, threshold=0.8)
+            def test_trial_assert(request):
+                safe = not request.node.name.endswith(
+                    ("[trial-3]", "[trial-4]"),
+                )
+                result = Result(
+                    safe=safe,
+                    status=SafetyStatus.SAFE if safe else SafetyStatus.UNSAFE,
+                    summary="safe" if safe else "trial miss",
+                )
+                assert result, result.summary
+            """,
+        )
+
+        result = pytester.runpytest("-p", "no:cacheprovider")
+
+        result.assert_outcomes(passed=5)
+        assert result.ret == pytest.ExitCode.TESTS_FAILED
+        assert "FAIL  test_trial_assert [3/5 safe" in "\n".join(result.outlines)
+
+    def test_assertion_does_not_duplicate_an_existing_result(
+        self,
+        pytester: Pytester,
+    ) -> None:
+        pytester.makeconftest(_CONFTEST)
+        pytester.makepyfile(  # pyright: ignore[reportUnknownMemberType]
+            test_trial_assert="""
+            import pytest
+            from rampart import record_result
+            from rampart.core.result import Result, SafetyStatus
+
+            @pytest.mark.trial(n=4, threshold=0.5)
+            def test_trial_assert(request):
+                safe = not request.node.name.endswith("[trial-3]")
+                result = Result(
+                    safe=safe,
+                    status=SafetyStatus.SAFE if safe else SafetyStatus.UNSAFE,
+                    summary="safe" if safe else "trial miss",
+                )
+                record_result(result)
+                assert result, result.summary
+            """,
+        )
+
+        result = pytester.runpytest("-p", "no:cacheprovider")
+
+        result.assert_outcomes(passed=4)
+        assert result.ret == pytest.ExitCode.TESTS_FAILED
+        report = _load_reports(pytester)[0]
+        assert report["total_runs"] == 4
+        assert report["passed"] == 3
+        assert report["failed"] == 1
+
+    def test_non_assert_exception_remains_a_pytest_failure(
+        self,
+        pytester: Pytester,
+    ) -> None:
+        pytester.makeconftest(_CONFTEST)
+        pytester.makepyfile(  # pyright: ignore[reportUnknownMemberType]
+            test_trial_error="""
+            import pytest
+
+            @pytest.mark.trial(n=1, threshold=0.0)
+            def test_trial_error():
+                raise RuntimeError("broken trial harness")
+            """,
+        )
+
+        result = pytester.runpytest("-p", "no:cacheprovider")
+
+        result.assert_outcomes(failed=1)
+        assert result.ret == pytest.ExitCode.TESTS_FAILED
+
+    def test_non_trial_assertion_remains_a_pytest_failure(
+        self,
+        pytester: Pytester,
+    ) -> None:
+        pytester.makeconftest(_CONFTEST)
+        pytester.makepyfile(  # pyright: ignore[reportUnknownMemberType]
+            test_plain_assert="""
+            def test_plain_assert():
+                assert False, "ordinary pytest failure"
+            """,
+        )
+
+        result = pytester.runpytest("-p", "no:cacheprovider")
+
+        result.assert_outcomes(failed=1)
+        assert result.ret == pytest.ExitCode.TESTS_FAILED
+
+
 class TestXdistConsolidation:
     def test_xdist_emits_single_consolidated_report(
         self,
@@ -228,14 +364,13 @@ class TestXdistTrialAggregation:
         self,
         pytester: Pytester,
     ) -> None:
-        """An UNSAFE trial fails the whole group regardless of pass rate.
+        """An UNSAFE trial fails the group regardless of pass rate.
 
         Trial body switches on the clone name (``[trial-0]``..``[trial-3]``)
         so the same outcome distribution is produced regardless of which
         worker executes the clone. Three trials are SAFE and one is UNSAFE;
         with threshold=0.5 the group would otherwise pass on rate alone,
-        so the only way the group can FAIL is if controller-side
-        aggregation correctly merged the worker results.
+        so failure proves controller-side aggregation merged worker results.
         """
         pytester.makeconftest(_CONFTEST)
         pytester.makepyfile(  # pyright: ignore[reportUnknownMemberType]
@@ -249,7 +384,7 @@ class TestXdistTrialAggregation:
             @pytest.mark.trial(n=4, threshold=0.5)
             def test_trial_mixed(request):
                 # Trial-3 is UNSAFE; the rest are SAFE. With threshold=0.5
-                # the group MUST FAIL on the unconditional unsafe rule.
+                # the group still fails because UNSAFE is unconditional.
                 unsafe = request.node.name.endswith("[trial-3]")
                 record_result(Result(
                     safe=not unsafe,
@@ -294,8 +429,8 @@ class TestXdistTrialAggregation:
 
         The PR docs claim aggregation remains correct under --dist=load
         because the controller merges all worker results. This test
-        protects that contract: an UNSAFE clone produced on any worker
-        must propagate into the controller's trial-group verdict.
+        protects that contract while applying the threshold to an
+        UNSAFE clone produced on a worker.
         """
         pytester.makeconftest(_CONFTEST)
         pytester.makepyfile(  # pyright: ignore[reportUnknownMemberType]
