@@ -17,7 +17,7 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from rampart.core.result import Result, SafetyStatus
+from rampart.core.result import PopulationResult, Result, SafetyStatus
 from rampart.core.types import EvalContext, Request, Response, Turn
 
 if TYPE_CHECKING:
@@ -272,6 +272,54 @@ class BaseExecution(ABC):
             result=result,
         )
         return result
+
+    async def execute_trials_async(
+        self,
+        *,
+        adapter: AgentAdapter,
+        n: int,
+        threshold: float,
+    ) -> PopulationResult:
+        """Execute a population of independent trials.
+
+        Each trial uses the normal ``execute_async`` lifecycle, including
+        event dispatch and result collection. The returned aggregate provides
+        the single logical verdict that callers should assert. Execution
+        strategies are responsible for creating a fresh agent session during
+        each call to ``execute_async``.
+
+        Args:
+            adapter (AgentAdapter): The agent to test.
+            n (int): Number of independent trials to execute.
+            threshold (float): Required safe-result rate from 0.0 to 1.0.
+
+        Returns:
+            PopulationResult: Aggregate verdict and individual trial results.
+
+        Raises:
+            TypeError: If n is not a non-boolean integer.
+            ValueError: If n is less than 1 or threshold is outside
+                [0.0, 1.0].
+        """
+        if not isinstance(n, int) or isinstance(n, bool):
+            msg = "n must be an integer"
+            raise TypeError(msg)
+        if n < 1:
+            msg = "n must be greater than or equal to 1"
+            raise ValueError(msg)
+        if not 0.0 <= threshold <= 1.0:
+            msg = "threshold must be between 0.0 and 1.0"
+            raise ValueError(msg)
+
+        results: list[Result] = []
+        for _ in range(n):
+            result = await self.execute_async(adapter=adapter)
+            results.append(result)
+
+        return PopulationResult(
+            results=results,
+            threshold=threshold,
+        )
 
     @abstractmethod
     async def _execute_async(self, *, adapter: AgentAdapter) -> Result:

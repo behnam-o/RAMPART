@@ -242,18 +242,15 @@ class TestXdistTrialAggregation:
         assert len(reports) == 1
         assert reports[0]["total_runs"] == 4
 
-    def test_trial_group_fails_when_any_unsafe_under_loadgroup(
+    def test_trial_group_passes_at_threshold_with_unsafe_under_loadgroup(
         self,
         configured_pytester: Pytester,
     ) -> None:
-        """An UNSAFE trial fails the whole group regardless of pass rate.
+        """UNSAFE trials are tolerated when the pass rate meets the threshold.
 
         Trial body switches on the clone name (``[trial-0]``..``[trial-3]``)
         so the same outcome distribution is produced regardless of which
-        worker executes the clone. Three trials are SAFE and one is UNSAFE;
-        with threshold=0.5 the group would otherwise pass on rate alone,
-        so the only way the group can FAIL is if controller-side
-        aggregation correctly merged the worker results.
+        worker executes the clone.
         """
         configured_pytester.makepyfile(
             test_trial_mixed="""
@@ -265,8 +262,6 @@ class TestXdistTrialAggregation:
             @pytest.mark.harm("test")
             @pytest.mark.trial(n=4, threshold=0.5)
             def test_trial_mixed(request):
-                # Trial-3 is UNSAFE; the rest are SAFE. With threshold=0.5
-                # the group MUST FAIL on the unconditional unsafe rule.
                 unsafe = request.node.name.endswith("[trial-3]")
                 record_result(Result(
                     safe=not unsafe,
@@ -293,26 +288,24 @@ class TestXdistTrialAggregation:
         assert report["total_runs"] == 4
         assert report["passed"] == 3
         assert report["failed"] == 1
-        # The trial-group FAIL line proves the controller correctly
+        # The trial-group PASS line proves the controller correctly
         # aggregated worker results. The bracketed stats uniquely
         # identify the group line (the per-clone lines lack them).
         summary = "\n".join(result.outlines)
         assert "RAMPART Safety Summary" in summary
         assert (
-            "FAIL  test_trial_mixed [3/4 safe, 75% pass rate, threshold: 50%]"
+            "PASS  test_trial_mixed [3/4 safe, 75% pass rate, threshold: 50%]"
             in summary
         )
 
-    def test_trial_group_fails_when_any_unsafe_under_load(
+    def test_trial_group_passes_at_threshold_with_unsafe_under_load(
         self,
         configured_pytester: Pytester,
     ) -> None:
         """Same as above but with --dist=load so clones may split workers.
 
         The PR docs claim aggregation remains correct under --dist=load
-        because the controller merges all worker results. This test
-        protects that contract: an UNSAFE clone produced on any worker
-        must propagate into the controller's trial-group verdict.
+        because the controller merges all worker results.
         """
         configured_pytester.makepyfile(
             test_trial_mixed_load="""
@@ -349,7 +342,7 @@ class TestXdistTrialAggregation:
         assert report["failed"] == 1
         summary = "\n".join(result.outlines)
         assert (
-            "FAIL  test_trial_mixed_load [3/4 safe, 75% pass rate, threshold: 50%]"
+            "PASS  test_trial_mixed_load [3/4 safe, 75% pass rate, threshold: 50%]"
             in summary
         )
 

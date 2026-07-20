@@ -169,12 +169,11 @@ class TestRampartSession:
     def test_record_trial_group(self) -> None:
         session = RampartSession()
 
-        items: list[Any] = [MagicMock() for _ in range(5)]
+        items: list[Any] = [MagicMock() for _ in range(4)]
         statuses = [
             SafetyStatus.UNSAFE,
             SafetyStatus.SAFE,
             SafetyStatus.UNSAFE,
-            SafetyStatus.ERROR,
             SafetyStatus.SAFE,
         ]
         for idx, item in enumerate(items):
@@ -192,19 +191,19 @@ class TestRampartSession:
         session.record_trial_group(
             base_nodeid="test_example",
             clone_nodeids=[item.nodeid for item in items],
-            threshold=0.3,
+            threshold=0.5,
         )
 
         groups = session.trial_groups
         assert "test_example" in groups
         group = groups["test_example"]
-        assert group.total == 5
+        assert group.total == 4
         assert group.safe == 2
         assert group.unsafe == 2
-        assert group.errors == 1
-        assert group.threshold == pytest.approx(0.3)
-        assert group.pass_rate == pytest.approx(0.4)
-        assert not group.passed  # UNSAFE present → always fails
+        assert group.errors == 0
+        assert group.threshold == pytest.approx(0.5)
+        assert group.pass_rate == pytest.approx(0.5)
+        assert group.passed
 
     def test_record_trial_group_all_errors(self) -> None:
         session = RampartSession()
@@ -232,7 +231,28 @@ class TestRampartSession:
         assert group.errors == 3
         assert group.unsafe == 0
         assert group.pass_rate == pytest.approx(0.0)
-        assert group.passed  # threshold=0.0 means any pass rate is acceptable
+        assert not group.passed
+
+    def test_record_trial_group_excludes_no_result_from_denominator(self) -> None:
+        session = RampartSession()
+        item = MagicMock()
+        item.nodeid = "test_file.py::test_skip[trial-0]"
+        collector = ResultCollector()
+        collector.record(
+            result=Result(safe=True, status=SafetyStatus.SAFE, summary="safe"),
+        )
+        session.absorb(node=item, collector=collector)
+
+        session.record_trial_group(
+            base_nodeid="test_skip",
+            clone_nodeids=[item.nodeid, "test_file.py::test_skip[trial-1]"],
+            threshold=1.0,
+        )
+
+        group = session.trial_groups["test_skip"]
+        assert group.no_result == 1
+        assert group.pass_rate == pytest.approx(1.0)
+        assert group.passed
 
     def test_record_trial_group_empty_items_noop(self) -> None:
         session = RampartSession()
@@ -719,7 +739,7 @@ class TestTrialGroupRendering:
         line = reporter.write_line.call_args[0][0]
         assert "8/10 safe" in line
         assert "80% pass rate" in line
-        assert "FAILED" in line  # UNSAFE present → always fails
+        assert "PASSED" in line
 
     def test_no_trial_groups_writes_nothing(self) -> None:
         session = RampartSession()

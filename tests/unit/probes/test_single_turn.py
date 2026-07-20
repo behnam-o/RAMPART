@@ -21,7 +21,7 @@ from rampart.core.types import (
 )
 from rampart.drivers.static import StaticDriver
 from rampart.probes import Probes
-from tests.fixtures import MockAdapter
+from tests.fixtures import MockAdapter, MockSession
 
 
 def _adapter(*, responses: list[Response]) -> MockAdapter:
@@ -103,6 +103,32 @@ class TestProbeStrategyName:
         ).execute_async(adapter=adapter)
 
         assert result.strategy == "probe"
+
+
+class TestProbePopulationIsolation:
+    async def test_each_trial_creates_a_distinct_session_async(self) -> None:
+        class TrackingAdapter(MockAdapter):
+            def __init__(self) -> None:
+                super().__init__(
+                    responses=[Response(text="ok")],
+                    manifest=AppManifest(name="test-agent"),
+                )
+                self.sessions: list[MockSession] = []
+
+            async def create_session_async(self) -> MockSession:
+                session = await super().create_session_async()
+                self.sessions.append(session)
+                return session
+
+        adapter = TrackingAdapter()
+
+        await Probes.behavior(
+            prompt="test",
+            evaluator=_DetectsAlways(),
+        ).execute_trials_async(adapter=adapter, n=3, threshold=1.0)
+
+        assert len(adapter.sessions) == 3
+        assert len({id(session) for session in adapter.sessions}) == 3
 
 
 class TestProbePromptCoercion:

@@ -3,9 +3,9 @@
 
 """Core result types for the RAMPART framework.
 
-Defines the single Result type, SafetyStatus, HarmCategory, InjectionRecord,
-and the resolve_as_attack / resolve_as_probe functions that map evaluator
-outcomes to safety verdicts.
+Defines single-run and population result types, SafetyStatus, HarmCategory,
+InjectionRecord, and the resolve_as_attack / resolve_as_probe functions that
+map evaluator outcomes to safety verdicts.
 """
 
 from __future__ import annotations
@@ -156,6 +156,87 @@ class Result:
             f"status={self.status.value}, "
             f"summary={self.summary!r})"
         )
+
+
+@dataclass(kw_only=True)
+class PopulationResult:
+    """Aggregate verdict for repeated executions of one safety test.
+
+    ``Result`` remains the verdict for one execution. This type applies a
+    threshold to a homogeneous population of those results and preserves the
+    individual results for reporting and future statistical analysis.
+
+    Args:
+        results (list[Result]): Results from trials that executed.
+        threshold (float): Required safe-result rate in the inclusive range
+            from 0.0 to 1.0.
+
+    Raises:
+        ValueError: If threshold is outside [0.0, 1.0].
+    """
+
+    results: list[Result]
+    threshold: float
+
+    def __post_init__(self) -> None:
+        """Validate population configuration.
+
+        Raises:
+            ValueError: If threshold is outside [0.0, 1.0].
+        """
+        if not 0.0 <= self.threshold <= 1.0:
+            msg = "threshold must be between 0.0 and 1.0"
+            raise ValueError(msg)
+    @property
+    def safe_count(self) -> int:
+        """Number of safe trials."""
+        return sum(result.status is SafetyStatus.SAFE for result in self.results)
+
+    @property
+    def executed_count(self) -> int:
+        """Number of executed trials."""
+        return len(self.results)
+
+    @property
+    def total_count(self) -> int:
+        """Number of trials in the population."""
+        return self.executed_count
+
+    @property
+    def pass_rate(self) -> float:
+        """Safe-result rate across executed trials."""
+        if self.executed_count == 0:
+            return 0.0
+        return self.safe_count / self.executed_count
+
+    @property
+    def status(self) -> SafetyStatus:
+        """Population status resolved using error and threshold policy."""
+        if any(result.status is SafetyStatus.ERROR for result in self.results):
+            return SafetyStatus.ERROR
+        if self.executed_count > 0 and self.pass_rate >= self.threshold:
+            return SafetyStatus.SAFE
+        if any(result.status is SafetyStatus.UNSAFE for result in self.results):
+            return SafetyStatus.UNSAFE
+        return SafetyStatus.UNDETERMINED
+
+    @property
+    def safe(self) -> bool:
+        """Whether the population met its safety threshold."""
+        return self.status is SafetyStatus.SAFE
+
+    @property
+    def summary(self) -> str:
+        """Concise population verdict summary."""
+        return (
+            f"{self.safe_count}/{self.executed_count} trials safe "
+            f"({self.pass_rate:.0%} pass rate, threshold: {self.threshold:.0%}); "
+            f"status: {self.status.value}"
+        )
+
+    def __bool__(self) -> bool:
+        """Return whether the population met its safety threshold."""
+        return self.safe
 
 
 def resolve_as_attack(*, eval_results: list[EvalResult]) -> tuple[bool, SafetyStatus]:

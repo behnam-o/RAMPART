@@ -11,6 +11,7 @@ import pytest
 from rampart.core.result import (
     HarmCategory,
     InjectionRecord,
+    PopulationResult,
     Result,
     SafetyStatus,
     resolve_as_attack,
@@ -29,6 +30,15 @@ from rampart.core.types import (
 def _er(outcome: EvalOutcome) -> EvalResult:
     """Shorthand to build an EvalResult with a given outcome."""
     return EvalResult(outcome=outcome)
+
+
+def _result(status: SafetyStatus) -> Result:
+    """Build a minimal result with the requested status."""
+    return Result(
+        safe=status is SafetyStatus.SAFE,
+        status=status,
+        summary=status.value,
+    )
 
 
 class TestSafetyStatus:
@@ -133,6 +143,74 @@ class TestResult:
             harm_category="custom_product_risk",
         )
         assert r.harm_category == "custom_product_risk"
+
+
+class TestPopulationResult:
+    def test_passes_at_exact_threshold(self) -> None:
+        population = PopulationResult(
+            results=[
+                _result(SafetyStatus.SAFE),
+                _result(SafetyStatus.SAFE),
+                _result(SafetyStatus.SAFE),
+                _result(SafetyStatus.UNSAFE),
+                _result(SafetyStatus.UNSAFE),
+            ],
+            threshold=0.6,
+        )
+
+        assert population.status is SafetyStatus.SAFE
+        assert population.pass_rate == pytest.approx(0.6)
+        assert bool(population) is True
+
+    def test_fails_below_threshold_with_unsafe_status(self) -> None:
+        population = PopulationResult(
+            results=[
+                _result(SafetyStatus.SAFE),
+                _result(SafetyStatus.UNSAFE),
+            ],
+            threshold=0.6,
+        )
+
+        assert population.status is SafetyStatus.UNSAFE
+        assert bool(population) is False
+
+    def test_error_takes_precedence_over_passing_rate(self) -> None:
+        population = PopulationResult(
+            results=[
+                _result(SafetyStatus.SAFE),
+                _result(SafetyStatus.ERROR),
+            ],
+            threshold=0.5,
+        )
+
+        assert population.status is SafetyStatus.ERROR
+
+    def test_undetermined_counts_against_pass_rate(self) -> None:
+        population = PopulationResult(
+            results=[
+                _result(SafetyStatus.SAFE),
+                _result(SafetyStatus.UNDETERMINED),
+            ],
+            threshold=0.75,
+        )
+
+        assert population.pass_rate == pytest.approx(0.5)
+        assert population.status is SafetyStatus.UNDETERMINED
+
+    @pytest.mark.parametrize("threshold", [-0.1, 1.1])
+    def test_rejects_threshold_outside_valid_range(self, threshold: float) -> None:
+        with pytest.raises(ValueError, match="threshold must be between"):
+            PopulationResult(results=[], threshold=threshold)
+
+    def test_summary_contains_population_verdict(self) -> None:
+        population = PopulationResult(
+            results=[_result(SafetyStatus.SAFE), _result(SafetyStatus.UNSAFE)],
+            threshold=0.5,
+        )
+
+        assert population.summary == (
+            "1/2 trials safe (50% pass rate, threshold: 50%); status: safe"
+        )
 
 
 class TestResultEvalResultsProperty:

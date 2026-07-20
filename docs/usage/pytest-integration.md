@@ -39,37 +39,39 @@ Built-in categories:
 | `HALLUCINATION` | `"hallucination"` |
 | `BEHAVIORAL_REGRESSION` | `"behavioral_regression"` |
 
-### `@pytest.mark.trial(n=, threshold=)`
+## Repeated Executions
+
+### `execute_trials_async(n=, threshold=)`
 
 Run a test multiple times for statistical confidence. Each trial is an independent execution with a fresh session.
 
-**Why use it:** LLM-based agents are non-deterministic — the same prompt can produce different behavior across runs. A single test execution may not be representative. Trials address this by running the same test `n` times independently and reporting aggregate statistics. The `threshold` parameter lets you set an acceptable pass rate, acknowledging that 100% consistency may be unrealistic while still catching regressions. For example, `threshold=0.8` means "this test should pass at least 80% of the time" — if your agent suddenly drops below that, something changed.
+**Why use it:** LLM-based agents are non-deterministic — the same prompt can produce different behavior across runs. A single test execution may not be representative. Trials address this by running the same test `n` times independently and calculating an aggregate verdict. The `threshold` parameter lets you set an acceptable pass rate, acknowledging that 100% consistency may be unrealistic while still catching regressions. For example, `threshold=0.8` means "this test should pass at least 80% of the time" — if your agent suddenly drops below that, something changed.
 
 ```python
-@pytest.mark.trial(n=10)
 async def test_injection_resistance(adapter):
-    ...
-
-@pytest.mark.trial(n=10, threshold=0.8)
-async def test_with_threshold(adapter):
-    ...
+    result = await Attacks.xpia(...).execute_trials_async(
+        adapter=adapter,
+        n=10,
+        threshold=0.8,
+    )
+    assert result, result.summary
 ```
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `n` | `int` | required | Number of trial repetitions |
-| `threshold` | `float` | `1.0` | Minimum fraction of trials that must be SAFE to pass |
+| `threshold` | `float` | required | Minimum fraction of executed trials that must be SAFE to pass |
 
 **Trial semantics:**
 
-- Each trial clone runs independently as a separate pytest item
-- Any `UNSAFE` result in any trial → the group **fails**
+- One logical test produces one pytest verdict
 - `threshold` sets the minimum pass rate: `threshold=0.8` requires ≥ 80% SAFE
-- `ERROR` results count against the pass rate (they are not `SAFE`)
-- The trial group aggregate appears in the terminal summary
+- An `ERROR` trial resolves the population to `ERROR`
+- `UNDETERMINED` trials count against the pass rate
+- Individual results and the aggregate verdict are available through `PopulationResult`
 
 !!! tip "Running trials in parallel"
-    Under [`pytest-xdist`](xdist.md), aggregation is correct under any `--dist` mode. The default `--dist=load` spreads trial clones across all workers and is usually fastest; use `--dist=loadgroup` only when a trial group must stay on one worker (shared session fixture or per-group worker state). See [Choosing `loadgroup` vs `load`](xdist.md#choosing-loadgroup-vs-load).
+    A call to `execute_trials_async` runs as one pytest item on one worker.
 
 ---
 

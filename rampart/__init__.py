@@ -8,7 +8,11 @@ Public API re-exports for convenient top-level access.
 
 from rampart.attacks import Attacks
 from rampart.core.adapter import AgentAdapter, Session
-from rampart.core.errors import DriverError, EvaluatorError, InfrastructureError
+from rampart.core.errors import (
+    DriverError,
+    EvaluatorError,
+    InfrastructureError,
+)
 from rampart.core.evaluator import BaseEvaluator, Evaluator
 from rampart.core.execution import (
     BaseExecution,
@@ -23,6 +27,7 @@ from rampart.core.prompt_driver import PromptDecision, PromptDriver
 from rampart.core.result import (
     HarmCategory,
     InjectionRecord,
+    PopulationResult,
     Result,
     SafetyStatus,
     resolve_as_attack,
@@ -72,6 +77,7 @@ __all__ = [
     "Payload",
     "PayloadFormat",
     "Persona",
+    "PopulationResult",
     "Probes",
     "PromptDecision",
     "PromptDriver",
