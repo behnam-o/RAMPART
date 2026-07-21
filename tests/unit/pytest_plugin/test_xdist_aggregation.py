@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 if TYPE_CHECKING:
-    from _pytest.pytester import Pytester, RunResult
+    from _pytest.pytester import Pytester
 
 
 pytest_plugins = ["pytester"]
@@ -175,259 +175,83 @@ class TestXdistConsolidation:
         assert report["population_summary"]["unsafe_count"] == 1
 
 
-class TestXdistTrialAggregation:
-    def test_trial_aggregation_across_workers_loadgroup(
+class TestPopulationPytestVerdict:
+    def _make_population_test(
         self,
+        *,
         configured_pytester: Pytester,
+        threshold: float,
     ) -> None:
         configured_pytester.makepyfile(
-            test_trial="""
+            test_population=f"""
             import pytest
-            from rampart import record_result
+
+            from rampart.core.execution import BaseExecution
             from rampart.core.result import Result, SafetyStatus
-            from rampart.core.types import ObservabilityLevel
 
-            @pytest.mark.harm("test")
-            @pytest.mark.trial(n=4, threshold=0.5)
-            def test_trial_split():
-                record_result(Result(
-                    safe=True, status=SafetyStatus.SAFE, summary="t",
-                    observability_level=ObservabilityLevel.RESPONSE_ONLY,
-                ))
-            """,
-        )
-        result = configured_pytester.runpytest(
-            "-p",
-            "no:cacheprovider",
-            "-n",
-            "2",
-            "--dist",
-            "loadgroup",
-        )
-        result.assert_outcomes(passed=4)
-        reports = _load_reports(configured_pytester)
-        assert len(reports) == 1
-        assert reports[0]["total_runs"] == 4
 
-    def test_trial_aggregation_across_workers_load(
-        self,
-        configured_pytester: Pytester,
-    ) -> None:
-        configured_pytester.makepyfile(
-            test_trial="""
-            import pytest
-            from rampart import record_result
-            from rampart.core.result import Result, SafetyStatus
-            from rampart.core.types import ObservabilityLevel
+            class SequenceExecution(BaseExecution):
+                def __init__(self):
+                    super().__init__()
+                    self.statuses = [
+                        SafetyStatus.SAFE,
+                        SafetyStatus.SAFE,
+                        SafetyStatus.SAFE,
+                        SafetyStatus.UNSAFE,
+                        SafetyStatus.UNSAFE,
+                    ]
 
-            @pytest.mark.harm("test")
-            @pytest.mark.trial(n=4, threshold=0.5)
-            def test_trial_split():
-                record_result(Result(
-                    safe=True, status=SafetyStatus.SAFE, summary="t",
-                    observability_level=ObservabilityLevel.RESPONSE_ONLY,
-                ))
-            """,
-        )
-        result = configured_pytester.runpytest(
-            "-p",
-            "no:cacheprovider",
-            "-n",
-            "2",
-            "--dist",
-            "load",
-        )
-        result.assert_outcomes(passed=4)
-        reports = _load_reports(configured_pytester)
-        assert len(reports) == 1
-        assert reports[0]["total_runs"] == 4
+                @property
+                def strategy_name(self):
+                    return "sequence"
 
-    def test_trial_group_passes_at_threshold_with_unsafe_under_loadgroup(
-        self,
-        configured_pytester: Pytester,
-    ) -> None:
-        """UNSAFE trials are tolerated when the pass rate meets the threshold.
+                async def _execute_async(self, *, adapter):
+                    status = self.statuses.pop(0)
+                    return Result(
+                        safe=status is SafetyStatus.SAFE,
+                        status=status,
+                        summary=status.value,
+                    )
 
-        Trial body switches on the clone name (``[trial-0]``..``[trial-3]``)
-        so the same outcome distribution is produced regardless of which
-        worker executes the clone.
-        """
-        configured_pytester.makepyfile(
-            test_trial_mixed="""
-            import pytest
-            from rampart import record_result
-            from rampart.core.result import Result, SafetyStatus
-            from rampart.core.types import ObservabilityLevel
 
-            @pytest.mark.harm("test")
-            @pytest.mark.trial(n=4, threshold=0.5)
-            def test_trial_mixed(request):
-                unsafe = request.node.name.endswith("[trial-3]")
-                record_result(Result(
-                    safe=not unsafe,
-                    status=SafetyStatus.UNSAFE if unsafe else SafetyStatus.SAFE,
-                    summary="u" if unsafe else "s",
-                    observability_level=ObservabilityLevel.RESPONSE_ONLY,
-                ))
-            """,
-        )
-        result = configured_pytester.runpytest(
-            "-p",
-            "no:cacheprovider",
-            "-n",
-            "2",
-            "--dist",
-            "loadgroup",
-        )
-        # All 4 clones pass at the pytest item level — record_result
-        # does not fail the test; it only records a Result.
-        result.assert_outcomes(passed=4)
-        reports = _load_reports(configured_pytester)
-        assert len(reports) == 1
-        report = reports[0]
-        assert report["total_runs"] == 4
-        assert report["passed"] == 3
-        assert report["failed"] == 1
-        # The trial-group PASS line proves the controller correctly
-        # aggregated worker results. The bracketed stats uniquely
-        # identify the group line (the per-clone lines lack them).
-        summary = "\n".join(result.outlines)
-        assert "RAMPART Safety Summary" in summary
-        assert (
-            "PASS  test_trial_mixed [3/4 safe, 75% pass rate, threshold: 50%]"
-            in summary
-        )
-
-    def test_trial_group_passes_at_threshold_with_unsafe_under_load(
-        self,
-        configured_pytester: Pytester,
-    ) -> None:
-        """Same as above but with --dist=load so clones may split workers.
-
-        The PR docs claim aggregation remains correct under --dist=load
-        because the controller merges all worker results.
-        """
-        configured_pytester.makepyfile(
-            test_trial_mixed_load="""
-            import pytest
-            from rampart import record_result
-            from rampart.core.result import Result, SafetyStatus
-            from rampart.core.types import ObservabilityLevel
-
-            @pytest.mark.harm("test")
-            @pytest.mark.trial(n=4, threshold=0.5)
-            def test_trial_mixed_load(request):
-                unsafe = request.node.name.endswith("[trial-3]")
-                record_result(Result(
-                    safe=not unsafe,
-                    status=SafetyStatus.UNSAFE if unsafe else SafetyStatus.SAFE,
-                    summary="u" if unsafe else "s",
-                    observability_level=ObservabilityLevel.RESPONSE_ONLY,
-                ))
-            """,
-        )
-        result = configured_pytester.runpytest(
-            "-p",
-            "no:cacheprovider",
-            "-n",
-            "2",
-            "--dist",
-            "load",
-        )
-        result.assert_outcomes(passed=4)
-        reports = _load_reports(configured_pytester)
-        assert len(reports) == 1
-        report = reports[0]
-        assert report["total_runs"] == 4
-        assert report["failed"] == 1
-        summary = "\n".join(result.outlines)
-        assert (
-            "PASS  test_trial_mixed_load [3/4 safe, 75% pass rate, threshold: 50%]"
-            in summary
-        )
-
-    def test_trial_group_fails_below_threshold_under_loadgroup(
-        self,
-        configured_pytester: Pytester,
-    ) -> None:
-        """No UNSAFE results, but pass rate below threshold => FAIL.
-
-        2 SAFE + 2 UNDETERMINED trials, threshold=0.75. Pass rate is 0.5
-        so the group must FAIL on the threshold rule (not the unsafe rule).
-        """
-        configured_pytester.makepyfile(
-            test_trial_threshold="""
-            import pytest
-            from rampart import record_result
-            from rampart.core.result import Result, SafetyStatus
-            from rampart.core.types import ObservabilityLevel
-
-            @pytest.mark.harm("test")
-            @pytest.mark.trial(n=4, threshold=0.75)
-            def test_trial_threshold(request):
-                undetermined = request.node.name.endswith(
-                    ("[trial-2]", "[trial-3]"),
+            @pytest.mark.trial(n=5, threshold={threshold})
+            async def test_population_threshold():
+                result = await SequenceExecution().execute_trials_async(
+                    adapter=object(),
+                    n=5,
+                    threshold={threshold},
                 )
-                record_result(Result(
-                    safe=True,
-                    status=(
-                        SafetyStatus.UNDETERMINED
-                        if undetermined else SafetyStatus.SAFE
-                    ),
-                    summary="t",
-                    observability_level=ObservabilityLevel.RESPONSE_ONLY,
-                ))
+                assert result, result.summary
             """,
         )
-        result = configured_pytester.runpytest(
-            "-p",
-            "no:cacheprovider",
-            "-n",
-            "2",
-            "--dist",
-            "loadgroup",
-        )
-        # All 4 clones pass as pytest tests (record_result(safe=True)),
-        # but the trial GROUP should fail on threshold.
-        result.assert_outcomes(passed=4)
-        summary = "\n".join(result.outlines)
-        assert "FAIL  test_trial_threshold" in summary
-        assert "50% pass rate" in summary
-        assert "threshold: 75%" in summary
 
-    def test_trial_group_passes_when_all_safe_under_loadgroup(
+    def test_exact_threshold_passes_one_pytest_item(
         self,
         configured_pytester: Pytester,
     ) -> None:
-        """All-SAFE trial group with achievable threshold => PASS verdict."""
-        configured_pytester.makepyfile(
-            test_trial_all_safe="""
-            import pytest
-            from rampart import record_result
-            from rampart.core.result import Result, SafetyStatus
-            from rampart.core.types import ObservabilityLevel
+        self._make_population_test(
+            configured_pytester=configured_pytester,
+            threshold=0.6,
+        )
 
-            @pytest.mark.harm("test")
-            @pytest.mark.trial(n=3, threshold=0.5)
-            def test_trial_all_safe():
-                record_result(Result(
-                    safe=True, status=SafetyStatus.SAFE, summary="ok",
-                    observability_level=ObservabilityLevel.RESPONSE_ONLY,
-                ))
-            """,
+        result = configured_pytester.runpytest("-p", "no:cacheprovider", "-q")
+
+        result.assert_outcomes(passed=1)
+        assert not any("trial-" in line for line in result.outlines)
+
+    def test_below_threshold_fails_one_pytest_item(
+        self,
+        configured_pytester: Pytester,
+    ) -> None:
+        self._make_population_test(
+            configured_pytester=configured_pytester,
+            threshold=0.8,
         )
-        result = configured_pytester.runpytest(
-            "-p",
-            "no:cacheprovider",
-            "-n",
-            "2",
-            "--dist",
-            "loadgroup",
-        )
-        result.assert_outcomes(passed=3)
-        summary = "\n".join(result.outlines)
-        assert "PASS  test_trial_all_safe" in summary
-        assert "PASSED" in summary
+
+        result = configured_pytester.runpytest("-p", "no:cacheprovider", "-q")
+
+        result.assert_outcomes(failed=1)
+        assert not any("trial-" in line for line in result.outlines)
 
 
 class TestXdistMetadata:
@@ -483,8 +307,8 @@ class TestCollectOnly:
                 assert reports == []
 
 
-class TestCloneIdDeterminism:
-    def test_trial_clone_ids_deterministic_across_processes(
+class TestTrialMarkerDeclaration:
+    def test_trial_marker_collects_one_item(
         self,
         configured_pytester: Pytester,
     ) -> None:
@@ -497,27 +321,40 @@ class TestCloneIdDeterminism:
                 pass
             """,
         )
-        result_serial: RunResult = configured_pytester.runpytest(
+        result = configured_pytester.runpytest(
             "-p",
             "no:cacheprovider",
             "--collect-only",
             "-q",
         )
-        result_parallel: RunResult = configured_pytester.runpytest(
-            "-p",
-            "no:cacheprovider",
-            "--collect-only",
-            "-q",
-            "-n",
-            "2",
+
+        result.assert_outcomes(passed=0)
+        assert sum("test_det.py::test_x" in line for line in result.outlines) == 1
+        assert not any("trial-" in line for line in result.outlines)
+
+    def test_trial_marker_remains_selectable(
+        self,
+        configured_pytester: Pytester,
+    ) -> None:
+        configured_pytester.makepyfile(
+            test_selection="""
+            import pytest
+
+            @pytest.mark.trial(n=3, threshold=0.8)
+            def test_population():
+                pass
+
+            def test_plain():
+                pass
+            """,
         )
 
-        def _trial_ids(lines: list[str]) -> list[str]:
-            return sorted(line.strip() for line in lines if "trial-" in line)
+        result = configured_pytester.runpytest(
+            "-p",
+            "no:cacheprovider",
+            "-m",
+            "trial",
+            "-q",
+        )
 
-        serial_ids = _trial_ids(result_serial.outlines)
-        parallel_ids = _trial_ids(result_parallel.outlines)
-        # Under xdist --collect-only, both should produce the same
-        # deterministic clone IDs so that workers can match them.
-        if serial_ids and parallel_ids:
-            assert serial_ids == parallel_ids
+        result.assert_outcomes(passed=1, deselected=1)

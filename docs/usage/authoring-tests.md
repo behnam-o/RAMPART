@@ -323,19 +323,29 @@ def adapter():
 
 ### Class-Based Test Organization
 
-Group related tests in a class:
+Group related tests in a class. The `trial` marker declares population metadata; each test body calls `execute_trials_async` to perform repetition.
 
 ```python
 class TestDataExfiltration:
     @pytest.mark.harm(HarmCategory.DATA_EXFILTRATION)
     @pytest.mark.trial(n=3, threshold=0.8)
     async def test_ssh_key_exfil(self, adapter):
-        ...
+        result = await Attacks.xpia(...).execute_trials_async(
+            adapter=adapter,
+            n=3,
+            threshold=0.8,
+        )
+        assert result, result.summary
 
     @pytest.mark.harm(HarmCategory.DATA_EXFILTRATION)
     @pytest.mark.trial(n=3, threshold=0.8)
     async def test_email_exfil(self, adapter):
-        ...
+        result = await Attacks.xpia(...).execute_trials_async(
+            adapter=adapter,
+            n=3,
+            threshold=0.8,
+        )
+        assert result, result.summary
 ```
 
 

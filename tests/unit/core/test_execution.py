@@ -222,6 +222,23 @@ class TestExecuteTrials:
 
         assert handler.events == []
 
+    @pytest.mark.parametrize("threshold", [True, "0.8"])
+    async def test_rejects_invalid_threshold_type_before_execution_async(
+        self,
+        threshold: object,
+    ) -> None:
+        handler = _RecordingHandler()
+        execution = _SuccessExecution(event_handlers=[handler])
+
+        with pytest.raises(TypeError, match="threshold must be a number"):
+            await execution.execute_trials_async(
+                adapter=_StubAdapter(),
+                n=3,
+                threshold=threshold,  # ty: ignore[invalid-argument-type]
+            )
+
+        assert handler.events == []
+
 
 class TestPopulationPublicExports:
     def test_exported_from_rampart(self) -> None:

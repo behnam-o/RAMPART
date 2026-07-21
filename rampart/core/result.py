@@ -172,6 +172,7 @@ class PopulationResult:
             from 0.0 to 1.0.
 
     Raises:
+        TypeError: If threshold is not a non-boolean number.
         ValueError: If threshold is outside [0.0, 1.0].
     """
 
@@ -182,11 +183,19 @@ class PopulationResult:
         """Validate population configuration.
 
         Raises:
+            TypeError: If threshold is not a non-boolean number.
             ValueError: If threshold is outside [0.0, 1.0].
         """
+        if not isinstance(self.threshold, int | float) or isinstance(
+            self.threshold,
+            bool,
+        ):
+            msg = "threshold must be a number"
+            raise TypeError(msg)
         if not 0.0 <= self.threshold <= 1.0:
             msg = "threshold must be between 0.0 and 1.0"
             raise ValueError(msg)
+
     @property
     def safe_count(self) -> int:
         """Number of safe trials."""
