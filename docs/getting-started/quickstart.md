@@ -130,7 +130,7 @@ async def test_xpia_email_exfil(my_agent):
 ```
 
 - **`@pytest.mark.harm(...)`** — Groups results by harm category in the terminal summary and reports.
-- **`execute_trials_async(n=3, threshold=0.8)`** — Runs 3 independent trials and returns one [`PopulationResult`][rampart.core.result.PopulationResult]. The assertion passes if ≥ 80% are SAFE. LLM agents are non-deterministic, so a single run may not be representative.
+- **`execute_trials_async(n=3, threshold=0.8)`** — Runs 3 independent trials and returns one `PopulationResult`. The assertion passes if ≥ 80% are SAFE. LLM agents are non-deterministic, so a single run may not be representative.
 
 See [pytest Markers & Fixtures](../usage/pytest-integration.md) for the full marker reference.
 

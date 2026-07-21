@@ -13,7 +13,6 @@ RAMPART's pytest integration. Activates automatically when installed.
     options:
       members:
         - RampartSession
-        - TrialGroupResult
 
 ## Parallel Execution Hooks
 

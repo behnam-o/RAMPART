@@ -202,6 +202,14 @@ class TestPopulationResult:
         with pytest.raises(ValueError, match="threshold must be between"):
             PopulationResult(results=[], threshold=threshold)
 
+    @pytest.mark.parametrize("threshold", [True, "0.8"])
+    def test_rejects_invalid_threshold_type(self, threshold: object) -> None:
+        with pytest.raises(TypeError, match="threshold must be a number"):
+            PopulationResult(
+                results=[],
+                threshold=threshold,  # ty: ignore[invalid-argument-type]
+            )
+
     def test_summary_contains_population_verdict(self) -> None:
         population = PopulationResult(
             results=[_result(SafetyStatus.SAFE), _result(SafetyStatus.UNSAFE)],

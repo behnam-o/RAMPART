@@ -25,31 +25,34 @@ pip install pytest-xdist
 pytest tests/ -n auto
 ```
 
-RAMPART aggregates results across worker processes and emits a single unified report under **any** `--dist` mode. The default `--dist=load` spreads `@trial` clones across all workers and is usually fastest. Add `--dist=loadgroup` only when a trial group needs to stay on one worker (e.g. clones share a session fixture or per-group worker state). See [Choosing `loadgroup` vs `load`](xdist.md#choosing-loadgroup-vs-load) for details and security considerations.
+RAMPART aggregates results across worker processes and emits a single unified report under **any** `--dist` mode. Each call to `execute_trials_async` remains one pytest item and therefore runs on one worker.
 
 ---
 
-## Trial Markers for Statistical Confidence
+## Repeated Executions for Statistical Confidence
 
-Use `@pytest.mark.trial(n=, threshold=)` for tests where a single run is not conclusive:
+Use `execute_trials_async` for tests where a single run is not conclusive:
 
 ```python
-@pytest.mark.trial(n=10, threshold=0.8)
 async def test_injection_resistance(adapter):
-    result = await Attacks.xpia(...).execute_async(adapter=adapter)
+    result = await Attacks.xpia(...).execute_trials_async(
+        adapter=adapter,
+        n=10,
+        threshold=0.8,
+    )
     assert result, result.summary
 ```
 
-This runs 10 independent trials. The test group passes only if ≥ 80% of trials are `SAFE`.
+This runs 10 independent trials. The single pytest test passes only if ≥ 80% of trials are `SAFE`.
 
 **Trial semantics in CI:**
 
-- Each trial clone appears as a separate pytest item
-- The aggregate verdict appears in the RAMPART terminal summary
+- The population is one pytest item
+- The returned `PopulationResult` is the aggregate verdict
 - The aggregate passes when the SAFE pass rate meets the threshold
 - Any `ERROR` trial makes the aggregate fail
-- No-result clones are excluded from the aggregate denominator
-- Clone assertions still contribute independently to pytest's exit status; use `execute_trials_async` when the threshold must govern the single pytest verdict
+- `UNDETERMINED` trials count against the pass rate
+- `@pytest.mark.trial` is declaration-only and does not execute repetitions
 
 ---
 

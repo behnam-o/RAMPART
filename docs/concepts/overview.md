@@ -122,7 +122,7 @@ You can reuse the same evaluator in both contexts. A [`ToolCalled`][rampart.eval
 
 RAMPART registers as a pytest plugin automatically when installed. It provides:
 
-- **Markers**: `@pytest.mark.harm(...)` for categorization, `@pytest.mark.trial(n=...)` for statistical repetition
+- **Markers**: `@pytest.mark.harm(...)` for categorization, `@pytest.mark.trial(n=...)` for population declaration and selection
 - **Automatic result collection**: Results from `Attacks.*` and `Probes.*` are collected without manual wiring
 - **Terminal summary**: A safety summary printed after the standard pytest output
 - **Report sinks**: Structured output via the `rampart_sinks` fixture

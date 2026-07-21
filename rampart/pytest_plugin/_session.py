@@ -3,8 +3,7 @@
 
 """Session-scoped state for the RAMPART pytest plugin.
 
-Accumulates Result objects, computes trial group aggregates, and
-builds the final TestRunReport.
+Accumulates Result objects and builds the final TestRunReport.
 """
 
 from __future__ import annotations
@@ -12,15 +11,12 @@ from __future__ import annotations
 import copy
 import logging
 from collections import Counter
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from rampart.core.result import Result, SafetyStatus
 from rampart.reporting.sink import ReportSink, TestRunReport
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
-
     import pytest
 
     from rampart.pytest_plugin._collection import ResultCollector
@@ -47,67 +43,12 @@ def _result_sort_key(result: Result) -> tuple[str, int, str]:
     return (nodeid, index, source_worker)
 
 
-@dataclass(frozen=True, kw_only=True)
-class TrialSpec:
-    """Trial-clone metadata captured at collection time.
-
-    Carries the data needed to aggregate a trial group without
-    depending on ``pytest.Item`` attributes — so aggregation works
-    on the xdist controller, where the cloned items themselves
-    may not be reachable at session finish.
-
-    Attributes:
-        base_nodeid (str): The original test's pytest node ID.
-        threshold (float): Minimum pass rate required for the group.
-    """
-
-    base_nodeid: str
-    threshold: float
-
-
-@dataclass(frozen=True, kw_only=True)
-class TrialGroupResult:
-    """Aggregate statistics for a trial group."""
-
-    total: int
-    safe: int
-    unsafe: int
-    errors: int
-    no_result: int
-    threshold: float
-    pass_rate: float
-    passed: bool
-
-    @property
-    def verdict(self) -> str:
-        """Human-readable verdict: PASSED or FAILED."""
-        return "PASSED" if self.passed else "FAILED"
-
-    @property
-    def terminal_label(self) -> str:
-        """Short label for terminal output: PASS or FAIL."""
-        return "PASS" if self.passed else "FAIL"
-
-    @property
-    def detail(self) -> str:
-        """Summary detail string for terminal output (e.g. '8/10 safe, 2 no-result')."""
-        parts = [f"{self.safe}/{self.total} safe"]
-        if self.no_result > 0:
-            parts.append(f"{self.no_result} no-result")
-        return ", ".join(parts)
-
-    @property
-    def has_unsafe(self) -> bool:
-        """True if any trial produced an UNSAFE result."""
-        return self.unsafe > 0
-
-
 class RampartSession:
     """Session-scoped state for the RAMPART plugin.
 
-    Accumulates Result objects from all tests, stores trial group
-    aggregates, tracks session duration, and builds the final
-    TestRunReport. Holds configured sinks for report emission.
+    Accumulates Result objects from all tests, tracks session duration,
+    and builds the final TestRunReport. Holds configured sinks for report
+    emission.
 
     Args:
         sinks (list[ReportSink]): Report sinks to emit to at session
@@ -117,8 +58,6 @@ class RampartSession:
     def __init__(self, *, sinks: list[ReportSink] | None = None) -> None:
         self._results: list[Result] = []
         self._results_by_nodeid: dict[str, list[Result]] = {}
-        self._trial_groups: dict[str, TrialGroupResult] = {}
-        self._trial_specs: dict[str, TrialSpec] = {}
         self._sinks: list[ReportSink] = sinks or []
         self._duration_seconds: float = 0.0
         self._cached_report: TestRunReport | None = None
@@ -228,135 +167,10 @@ class RampartSession:
         self._results_by_nodeid[node.nodeid] = tagged
         self._cached_report = None
 
-    def record_trial_group(
-        self,
-        *,
-        base_nodeid: str,
-        clone_nodeids: Sequence[str],
-        threshold: float,
-    ) -> None:
-        """Record aggregate statistics for a trial group.
-
-        Semantics:
-                - ERROR results make the group fail.
-                - threshold is the minimum pass rate (SAFE / executed).
-          e.g. 0.8 means at least 80% of runs must be SAFE.
-        - Clones with zero results (skipped or crashed before producing
-                    a Result) are tracked as ``no_result`` and excluded from
-                    the pass-rate denominator.
-                - UNSAFE and UNDETERMINED results count against the pass rate.
-
-        Args:
-            base_nodeid (str): The original test's node ID.
-            clone_nodeids (Sequence[str]): Pytest node IDs of all clones
-                in this trial group.
-            threshold (float): Minimum pass rate required.
-        """
-        if not clone_nodeids:
-            return
-
-        total = len(clone_nodeids)
-        unsafe_count = 0
-        error_count = 0
-        safe_count = 0
-        no_result_count = 0
-
-        for nodeid in clone_nodeids:
-            node_results = self._results_by_nodeid.get(nodeid, [])
-            if not node_results:
-                no_result_count += 1
-                continue
-            has_unsafe = any(r.status == SafetyStatus.UNSAFE for r in node_results)
-            has_error = any(r.status == SafetyStatus.ERROR for r in node_results)
-            has_safe = any(r.status == SafetyStatus.SAFE for r in node_results)
-            if has_unsafe:
-                unsafe_count += 1
-            elif has_error:
-                error_count += 1
-            elif has_safe:
-                safe_count += 1
-
-        executed_count = total - no_result_count
-        pass_rate = safe_count / executed_count if executed_count > 0 else 0.0
-        passed = (
-            error_count == 0
-            and executed_count > 0
-            and pass_rate >= threshold
-        )
-
-        self._trial_groups[base_nodeid] = TrialGroupResult(
-            total=total,
-            safe=safe_count,
-            unsafe=unsafe_count,
-            errors=error_count,
-            no_result=no_result_count,
-            threshold=threshold,
-            pass_rate=pass_rate,
-            passed=passed,
-        )
-
-    def register_trial_spec(
-        self,
-        *,
-        clone_nodeid: str,
-        base_nodeid: str,
-        threshold: float,
-    ) -> None:
-        """Record trial metadata for a cloned item at collection time.
-
-        Called from ``pytest_collection_modifyitems`` whenever a
-        ``@pytest.mark.trial`` test is expanded into clones. Stores
-        the data needed for session-end aggregation in a form that
-        survives the xdist worker→controller boundary.
-
-        Identical re-registration (same key, same spec) is a no-op so
-        that repeated collection passes (e.g., in workers and the
-        controller) converge safely.
-
-        Args:
-            clone_nodeid (str): Node ID of the cloned item.
-            base_nodeid (str): Node ID of the original (uncloned) item.
-            threshold (float): Pass-rate threshold from the trial marker.
-        """
-        self._trial_specs[clone_nodeid] = TrialSpec(
-            base_nodeid=base_nodeid,
-            threshold=threshold,
-        )
-
-    def merge_trial_specs(
-        self,
-        *,
-        trial_specs: Mapping[str, TrialSpec],
-    ) -> None:
-        """Merge trial specs received from an xdist worker payload.
-
-        Idempotent: re-merging identical specs is a no-op. Spec values
-        from workers should match the controller's own collection
-        because the same plugin code runs in every process; we merge
-        defensively so the controller can aggregate correctly even
-        when its own collection state is unavailable.
-
-        Args:
-            trial_specs (Mapping[str, TrialSpec]): Specs keyed by
-                clone node ID.
-        """
-        for clone_nodeid, spec in trial_specs.items():
-            self._trial_specs.setdefault(clone_nodeid, spec)
-
     @property
     def has_results(self) -> bool:
         """True if any results have been collected."""
         return bool(self._results)
-
-    @property
-    def trial_groups(self) -> dict[str, TrialGroupResult]:
-        """Trial group aggregates, keyed by base node ID."""
-        return dict(self._trial_groups)
-
-    @property
-    def trial_specs(self) -> dict[str, TrialSpec]:
-        """Read-only view of registered trial specs, keyed by clone node ID."""
-        return dict(self._trial_specs)
 
     def merge_worker_results(
         self,

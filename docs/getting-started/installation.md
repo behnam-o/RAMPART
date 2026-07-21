@@ -118,7 +118,7 @@ Expected output:
 
 ```
 @pytest.mark.harm(*categories): categorize by harm type
-@pytest.mark.trial(n=, threshold=): statistical repetition
+@pytest.mark.trial(n=, threshold=): trial population declaration
 ```
 
 RAMPART registers as a pytest plugin automatically via the `pytest11` entry point. No `conftest.py` configuration is needed to activate it.

@@ -297,7 +297,8 @@ class BaseExecution(ABC):
             PopulationResult: Aggregate verdict and individual trial results.
 
         Raises:
-            TypeError: If n is not a non-boolean integer.
+            TypeError: If n is not a non-boolean integer or threshold is not
+                a non-boolean number.
             ValueError: If n is less than 1 or threshold is outside
                 [0.0, 1.0].
         """
@@ -307,19 +308,14 @@ class BaseExecution(ABC):
         if n < 1:
             msg = "n must be greater than or equal to 1"
             raise ValueError(msg)
-        if not 0.0 <= threshold <= 1.0:
-            msg = "threshold must be between 0.0 and 1.0"
-            raise ValueError(msg)
 
         results: list[Result] = []
+        population = PopulationResult(results=results, threshold=threshold)
         for _ in range(n):
             result = await self.execute_async(adapter=adapter)
             results.append(result)
 
-        return PopulationResult(
-            results=results,
-            threshold=threshold,
-        )
+        return population
 
     @abstractmethod
     async def _execute_async(self, *, adapter: AgentAdapter) -> Result:
