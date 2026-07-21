@@ -8,7 +8,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 from rampart.core.execution import ExecutionEvent, ExecutionEventData
-from rampart.core.result import Result, SafetyStatus
+from rampart.core.result import PopulationResult, Result, SafetyStatus
 from rampart.pytest_plugin._collection import (
     ResultCollectionHandler,
     ResultCollector,
@@ -28,12 +28,14 @@ def _make_event_data(
     *,
     event: ExecutionEvent,
     result: Result | None = None,
+    population: PopulationResult | None = None,
 ) -> ExecutionEventData:
     """Build an ExecutionEventData with a mock adapter."""
     return ExecutionEventData(
         event=event,
         adapter=MagicMock(),
         result=result,
+        population=population,
     )
 
 
@@ -64,6 +66,7 @@ class TestResultCollector:
     def test_empty_collector(self) -> None:
         collector = ResultCollector()
         assert collector.results == []
+        assert collector.populations == []
 
 
 class TestResultCollectionHandler:
@@ -84,6 +87,23 @@ class TestResultCollectionHandler:
 
             assert len(collector.results) == 1
             assert collector.results[0].summary == "captured"
+        finally:
+            _active_collector.reset(token)
+
+    async def test_records_completed_population_async(self) -> None:
+        collector = ResultCollector()
+        token = _active_collector.set(collector)
+        try:
+            handler = ResultCollectionHandler()
+            population = PopulationResult(results=[_make_result()], threshold=1.0)
+            event_data = _make_event_data(
+                event=ExecutionEvent.ON_POST_POPULATION,
+                population=population,
+            )
+
+            await handler.on_event(event_data=event_data)
+
+            assert collector.populations == [population]
         finally:
             _active_collector.reset(token)
 

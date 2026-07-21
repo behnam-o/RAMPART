@@ -17,7 +17,7 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from rampart.core.result import Result, SafetyStatus
+from rampart.core.result import PopulationResult, Result, SafetyStatus
 from rampart.core.types import EvalContext, Request, Response, Turn
 
 if TYPE_CHECKING:
@@ -34,6 +34,7 @@ class ExecutionEvent(Enum):
     ON_PRE_EXECUTE:  Fired before _execute_async is called.
     ON_POST_EXECUTE: Fired after _execute_async returns a Result
                      (including error results).
+    ON_POST_POPULATION: Fired after execute_trials_async completes.
     ON_ERROR:        Fired when _execute_async raises any exception.
                      The exception is converted to an ERROR result
                      after handlers are notified.
@@ -41,6 +42,7 @@ class ExecutionEvent(Enum):
 
     ON_PRE_EXECUTE = "on_pre_execute"
     ON_POST_EXECUTE = "on_post_execute"
+    ON_POST_POPULATION = "on_post_population"
     ON_ERROR = "on_error"
 
 
@@ -52,6 +54,8 @@ class ExecutionEventData:
         event (ExecutionEvent): Which lifecycle point fired.
         adapter (AgentAdapter): The adapter under test.
         result (Result | None): Populated on ON_POST_EXECUTE only.
+        population (PopulationResult | None): Populated on
+            ON_POST_POPULATION only.
         error (Exception | None): Populated on ON_ERROR only.
         elapsed_seconds (float): Wall-clock seconds since execute_async was called.
     """
@@ -59,6 +63,7 @@ class ExecutionEventData:
     event: ExecutionEvent
     adapter: AgentAdapter
     result: Result | None = None
+    population: PopulationResult | None = None
     error: Exception | None = None
     elapsed_seconds: float = 0.0
 
@@ -315,6 +320,12 @@ class BaseExecution(ABC):
             result = await self.execute_async(adapter=adapter)
             results.append(result)
 
+        await self._fire(
+            ExecutionEvent.ON_POST_POPULATION,
+            adapter=adapter,
+            elapsed=sum(result.duration_seconds for result in results),
+            population=population,
+        )
         return population
 
     @abstractmethod
@@ -336,6 +347,7 @@ class BaseExecution(ABC):
         adapter: AgentAdapter,
         elapsed: float,
         result: Result | None = None,
+        population: PopulationResult | None = None,
         error: Exception | None = None,
     ) -> None:
         """Dispatch an event to all registered handlers.
@@ -348,12 +360,15 @@ class BaseExecution(ABC):
             adapter (AgentAdapter): The adapter under test.
             elapsed (float): Wall-clock seconds since execute_async started.
             result (Result | None): Present on ON_POST_EXECUTE only.
+            population (PopulationResult | None): Present on
+                ON_POST_POPULATION only.
             error (Exception | None): Present on ON_ERROR only.
         """
         event_data = ExecutionEventData(
             event=event,
             adapter=adapter,
             result=result,
+            population=population,
             error=error,
             elapsed_seconds=elapsed,
         )

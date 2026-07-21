@@ -4,13 +4,29 @@ RAMPART's configurable components: [`LLMConfig`][rampart.core.llm.LLMConfig] for
 
 ---
 
-## Parallel-execution tuning
+## Pytest execution options
 
-RAMPART exposes one pytest option for parallel-execution tuning. Other components (LLM endpoints, agent configuration) typically have their own configuration conventions.
+RAMPART exposes pytest options for population depth and parallel-execution tuning. Other components (LLM endpoints, agent configuration) typically have their own configuration conventions.
 
 | Option | Default | Description |
 |--------|---------|-------------|
+| `--rampart-trials N` | marker `n` | Override the execution count for tests marked `@pytest.mark.trial`. The marker's `threshold` is not overridden. |
 | `--rampart-xdist-max-bytes` (CLI) / `rampart_xdist_max_bytes` (ini) | `67108864` (64 MB) | Maximum size of a worker's serialized result payload when running under [`pytest-xdist`](xdist.md). Workers exceeding the cap are recorded as incomplete in `TestRunReport.metadata`. |
+
+Use the `trial_config` fixture rather than repeating marker values in the test body. This keeps execution aligned with the declaration and lets CI change sample depth without changing the correctness threshold:
+
+```python
+@pytest.mark.trial(n=3, threshold=0.8)
+async def test_population(adapter, trial_config):
+    result = await execution.execute_trials_async(
+        adapter=adapter,
+        n=trial_config.n,
+        threshold=trial_config.threshold,
+    )
+    assert result, result.summary
+```
+
+For example, `pytest --rampart-trials=50 -m trial` runs selected populations at depth 50. An invalid or non-positive override is rejected during command-line parsing.
 
 ---
 

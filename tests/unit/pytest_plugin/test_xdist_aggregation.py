@@ -358,3 +358,147 @@ class TestTrialMarkerDeclaration:
         )
 
         result.assert_outcomes(passed=1, deselected=1)
+
+    def test_trial_config_resolves_marker_and_cli_override(
+        self,
+        configured_pytester: Pytester,
+    ) -> None:
+        configured_pytester.makepyfile(
+            test_config="""
+            import pytest
+
+            from rampart import record_result
+            from rampart.core.result import Result, SafetyStatus
+
+            @pytest.mark.trial(n=3, threshold=0.8)
+            def test_population(trial_config):
+                assert trial_config.n == 7
+                assert trial_config.threshold == 0.8
+                record_result(Result(
+                    safe=True,
+                    status=SafetyStatus.SAFE,
+                    summary="safe",
+                ))
+            """,
+        )
+
+        result = configured_pytester.runpytest(
+            "-p",
+            "no:cacheprovider",
+            "--rampart-trials=7",
+            "-q",
+        )
+
+        result.assert_outcomes(passed=1)
+        reports = _load_reports(configured_pytester)
+        result_data = reports[0]["by_harm_category"]["uncategorized"][0]
+        assert result_data["metadata"]["_rampart_trial"] == {
+            "n": 7,
+            "threshold": 0.8,
+        }
+
+    def test_method_marker_shadows_class_marker_without_merging(
+        self,
+        configured_pytester: Pytester,
+    ) -> None:
+        configured_pytester.makepyfile(
+            test_inheritance="""
+            import pytest
+
+            @pytest.mark.trial(n=5, threshold=0.9)
+            class TestPopulation:
+                def test_inherits(self, trial_config):
+                    assert trial_config.n == 5
+                    assert trial_config.threshold == 0.9
+
+                @pytest.mark.trial(n=2)
+                def test_shadows(self, trial_config):
+                    assert trial_config.n == 2
+                    assert trial_config.threshold == 1.0
+            """,
+        )
+
+        result = configured_pytester.runpytest("-p", "no:cacheprovider", "-q")
+
+        result.assert_outcomes(passed=2)
+
+    def test_population_mismatch_warns(
+        self,
+        configured_pytester: Pytester,
+    ) -> None:
+        self._make_mismatched_population_test(configured_pytester=configured_pytester)
+
+        result = configured_pytester.runpytest("-p", "no:cacheprovider", "-q")
+
+        result.assert_outcomes(passed=1)
+        result.stdout.fnmatch_lines(["*TrialMismatchWarning*declared trial(n=3*"])
+
+    def test_invalid_marker_argument_is_rejected(
+        self,
+        configured_pytester: Pytester,
+    ) -> None:
+        configured_pytester.makepyfile(
+            test_invalid="""
+            import pytest
+
+            @pytest.mark.trial(n=3, target=0.8)
+            def test_population(trial_config):
+                pass
+            """,
+        )
+
+        result = configured_pytester.runpytest("-p", "no:cacheprovider", "-q")
+
+        result.assert_outcomes(errors=1)
+        result.stdout.fnmatch_lines(["*unsupported argument(s): target*"])
+
+    def test_population_mismatch_warning_can_be_an_error(
+        self,
+        configured_pytester: Pytester,
+    ) -> None:
+        self._make_mismatched_population_test(configured_pytester=configured_pytester)
+
+        result = configured_pytester.runpytest(
+            "-p",
+            "no:cacheprovider",
+            "-W",
+            "error::rampart.pytest_plugin.TrialMismatchWarning",
+            "-q",
+        )
+
+        result.assert_outcomes(passed=1, errors=1)
+
+    def _make_mismatched_population_test(
+        self,
+        *,
+        configured_pytester: Pytester,
+    ) -> None:
+        configured_pytester.makepyfile(
+            test_mismatch="""
+            import pytest
+
+            from rampart.core.execution import BaseExecution
+            from rampart.core.result import Result, SafetyStatus
+
+            class SafeExecution(BaseExecution):
+                @property
+                def strategy_name(self):
+                    return "safe"
+
+                async def _execute_async(self, *, adapter):
+                    return Result(
+                        safe=True,
+                        status=SafetyStatus.SAFE,
+                        summary="safe",
+                    )
+
+            @pytest.mark.trial(n=3, threshold=0.8)
+            async def test_population():
+                result = await SafeExecution().execute_trials_async(
+                    adapter=object(),
+                    n=2,
+                    threshold=1.0,
+                )
+                assert result
+            """,
+        )

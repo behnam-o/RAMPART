@@ -26,6 +26,7 @@ from rampart.core.prompt_driver import PromptDecision, PromptDriver
 from rampart.core.result import (
     HarmCategory,
     InjectionRecord,
+    PopulationResult,
     Result,
     SafetyStatus,
     resolve_as_attack,
@@ -70,6 +71,7 @@ __all__ = [
     "PayloadConverter",
     "PayloadFormat",
     "Persona",
+    "PopulationResult",
     "PromptDecision",
     "PromptDriver",
     "Request",

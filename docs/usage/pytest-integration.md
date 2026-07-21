@@ -41,7 +41,24 @@ Built-in categories:
 
 ### `@pytest.mark.trial(n=, threshold=)`
 
-Declare that a test represents a trial population. The marker remains selectable with `pytest -m trial`, but it does not repeat or clone the test. Use `execute_trials_async` to execute the declared population.
+Declare that a test represents a trial population. The marker remains selectable with `pytest -m trial`, but it does not repeat or clone the test. The defaults are `n=1` and `threshold=1.0`.
+
+Use the `trial_config` fixture to pass the resolved declaration to `execute_trials_async`:
+
+```python
+@pytest.mark.trial(n=10, threshold=0.8)
+async def test_injection_resistance(adapter, trial_config):
+    result = await Attacks.xpia(...).execute_trials_async(
+        adapter=adapter,
+        n=trial_config.n,
+        threshold=trial_config.threshold,
+    )
+    assert result, result.summary
+```
+
+`--rampart-trials=N` overrides only `n`, allowing different sample depths for local and scheduled runs. The threshold is never overridden because it is the test's correctness bar. If a marked test executes a population with different values, RAMPART emits `TrialMismatchWarning`; use `-W error::rampart.pytest_plugin.TrialMismatchWarning` to make mismatches fail the test run.
+
+Class-level trial markers are inherited. A method-level marker shadows the class marker completely; keyword arguments from the two markers are not merged.
 
 ## Repeated Executions
 
@@ -52,13 +69,14 @@ Run a test multiple times for statistical confidence. Each trial is an independe
 **Why use it:** LLM-based agents are non-deterministic — the same prompt can produce different behavior across runs. A single test execution may not be representative. Trials address this by running the same test `n` times independently and reporting aggregate statistics. The `threshold` parameter lets you set an acceptable pass rate, acknowledging that 100% consistency may be unrealistic while still catching regressions. For example, `threshold=0.8` means "this test should pass at least 80% of the time" — if your agent suddenly drops below that, something changed.
 
 ```python
-@pytest.mark.trial(n=10)
-async def test_injection_resistance(adapter):
-    ...
-
 @pytest.mark.trial(n=10, threshold=0.8)
-async def test_with_threshold(adapter):
-    ...
+async def test_injection_resistance(adapter, trial_config):
+    result = await Attacks.xpia(...).execute_trials_async(
+        adapter=adapter,
+        n=trial_config.n,
+        threshold=trial_config.threshold,
+    )
+    assert result, result.summary
 ```
 
 | Parameter | Type | Default | Description |
@@ -80,6 +98,27 @@ async def test_with_threshold(adapter):
 ---
 
 ## Fixtures
+
+### `trial_config`
+
+Available to tests marked with `@pytest.mark.trial`. It returns an immutable `TrialConfig` with the effective `n` and `threshold`:
+
+```python
+from rampart.pytest_plugin import TrialConfig
+
+@pytest.mark.trial(n=5, threshold=0.8)
+async def test_population(adapter, trial_config: TrialConfig):
+    result = await execution.execute_trials_async(
+        adapter=adapter,
+        n=trial_config.n,
+        threshold=trial_config.threshold,
+    )
+    assert result, result.summary
+```
+
+The effective values are included in each collected result's structured metadata under `_rampart_trial`, allowing reports and cost tooling to account for the population depth. Requesting the fixture from an unmarked test is an error.
+
+---
 
 ### `rampart_sinks`
 

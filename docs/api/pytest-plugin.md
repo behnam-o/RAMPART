@@ -14,6 +14,12 @@ RAMPART's pytest integration. Activates automatically when installed.
       members:
         - RampartSession
 
+::: rampart.pytest_plugin._trial
+    options:
+      members:
+        - TrialConfig
+        - TrialMismatchWarning
+
 ## Parallel Execution Hooks
 
 When `pytest-xdist` is installed, the plugin registers `pytest_testnodedown` (as an optional hook) to merge worker results into the controller session. See [Parallel Execution](../usage/xdist.md) for the data flow and trust boundary.
