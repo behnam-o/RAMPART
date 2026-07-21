@@ -97,14 +97,12 @@ class TestRunReport:
 
         Each Result corresponds to one test execution — one run of one
         test body. For parametrized payload suites, each payload variant
-        is one Result. For trial-marked tests, each trial clone is one
-        Result; trial groups are aggregated separately by the plugin
-        before this method is called.
+        is one Result. Population executions contribute each individual
+        Result while their PopulationResult controls the test assertion.
 
         This method does not distinguish payloads from trial repetitions.
-        Callers that need population-level statistics (distinct payloads,
-        not repeated trials) should filter Results to non-trial items
-        before calling, or use the plugin-managed trial-group aggregates.
+        Callers that need statistics over distinct payloads rather than
+        repeated executions should filter Results before calling.
 
         Args:
             harm_category (HarmCategory | str | None): Filter to a specific

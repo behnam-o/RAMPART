@@ -158,6 +158,100 @@ class TestBaseExecutionLifecycle:
         assert post.elapsed_seconds >= 0.0
 
 
+class TestExecuteTrials:
+    async def test_returns_population_result_async(self) -> None:
+        execution = _SuccessExecution()
+
+        population = await execution.execute_trials_async(
+            adapter=_StubAdapter(),
+            n=3,
+            threshold=0.8,
+        )
+
+        assert population.safe is True
+        assert population.executed_count == 3
+        assert population.pass_rate == pytest.approx(1.0)
+
+    async def test_runs_normal_lifecycle_for_every_trial_async(self) -> None:
+        handler = _RecordingHandler()
+        execution = _SuccessExecution(event_handlers=[handler])
+
+        population = await execution.execute_trials_async(
+            adapter=_StubAdapter(),
+            n=3,
+            threshold=1.0,
+        )
+
+        assert len(population.results) == 3
+        assert [event.event for event in handler.events] == [
+            ExecutionEvent.ON_PRE_EXECUTE,
+            ExecutionEvent.ON_POST_EXECUTE,
+        ] * 3
+
+    async def test_rejects_non_positive_trial_count_async(self) -> None:
+        execution = _SuccessExecution()
+
+        with pytest.raises(ValueError, match="n must be greater"):
+            await execution.execute_trials_async(
+                adapter=_StubAdapter(),
+                n=0,
+                threshold=0.8,
+            )
+
+    @pytest.mark.parametrize("n", [True, 1.5, "3"])
+    async def test_rejects_invalid_trial_count_type_async(self, n: object) -> None:
+        execution = _SuccessExecution()
+
+        with pytest.raises(TypeError, match="n must be an integer"):
+            await execution.execute_trials_async(
+                adapter=_StubAdapter(),
+                n=n,  # ty: ignore[invalid-argument-type]
+                threshold=0.8,
+            )
+
+    async def test_rejects_invalid_threshold_before_execution_async(self) -> None:
+        handler = _RecordingHandler()
+        execution = _SuccessExecution(event_handlers=[handler])
+
+        with pytest.raises(ValueError, match="threshold must be between"):
+            await execution.execute_trials_async(
+                adapter=_StubAdapter(),
+                n=3,
+                threshold=1.1,
+            )
+
+        assert handler.events == []
+
+    @pytest.mark.parametrize("threshold", [True, "0.8"])
+    async def test_rejects_invalid_threshold_type_before_execution_async(
+        self,
+        threshold: object,
+    ) -> None:
+        handler = _RecordingHandler()
+        execution = _SuccessExecution(event_handlers=[handler])
+
+        with pytest.raises(TypeError, match="threshold must be a number"):
+            await execution.execute_trials_async(
+                adapter=_StubAdapter(),
+                n=3,
+                threshold=threshold,  # ty: ignore[invalid-argument-type]
+            )
+
+        assert handler.events == []
+
+
+class TestPopulationPublicExports:
+    def test_exported_from_rampart(self) -> None:
+        from rampart import PopulationResult as TopLevelPopulationResult
+
+        assert TopLevelPopulationResult is PopulationResult
+
+    def test_exported_from_rampart_core(self) -> None:
+        from rampart.core import PopulationResult as CorePopulationResult
+
+        assert CorePopulationResult is PopulationResult
+
+
 class TestInfrastructureErrorHandling:
     async def test_produces_error_result(self) -> None:
         execution = _InfraErrorExecution()

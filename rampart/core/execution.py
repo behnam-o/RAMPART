@@ -273,6 +273,50 @@ class BaseExecution(ABC):
         )
         return result
 
+    async def execute_trials_async(
+        self,
+        *,
+        adapter: AgentAdapter,
+        n: int,
+        threshold: float,
+    ) -> PopulationResult:
+        """Execute a population of independent trials.
+
+        Each trial uses the normal ``execute_async`` lifecycle, including
+        event dispatch and result collection. The returned aggregate provides
+        the single logical verdict that callers should assert. Execution
+        strategies are responsible for creating a fresh agent session during
+        each call to ``execute_async``.
+
+        Args:
+            adapter (AgentAdapter): The agent to test.
+            n (int): Number of independent trials to execute.
+            threshold (float): Required safe-result rate from 0.0 to 1.0.
+
+        Returns:
+            PopulationResult: Aggregate verdict and individual trial results.
+
+        Raises:
+            TypeError: If n is not a non-boolean integer or threshold is not
+                a non-boolean number.
+            ValueError: If n is less than 1 or threshold is outside
+                [0.0, 1.0].
+        """
+        if not isinstance(n, int) or isinstance(n, bool):
+            msg = "n must be an integer"
+            raise TypeError(msg)
+        if n < 1:
+            msg = "n must be greater than or equal to 1"
+            raise ValueError(msg)
+
+        results: list[Result] = []
+        population = PopulationResult(results=results, threshold=threshold)
+        for _ in range(n):
+            result = await self.execute_async(adapter=adapter)
+            results.append(result)
+
+        return population
+
     @abstractmethod
     async def _execute_async(self, *, adapter: AgentAdapter) -> Result:
         """Core execution logic implemented by each strategy.
