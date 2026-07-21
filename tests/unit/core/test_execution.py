@@ -186,7 +186,8 @@ class TestExecuteTrials:
         assert [event.event for event in handler.events] == [
             ExecutionEvent.ON_PRE_EXECUTE,
             ExecutionEvent.ON_POST_EXECUTE,
-        ] * 3
+        ] * 3 + [ExecutionEvent.ON_POST_POPULATION]
+        assert handler.events[-1].population is population
 
     async def test_rejects_non_positive_trial_count_async(self) -> None:
         execution = _SuccessExecution()

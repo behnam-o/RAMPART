@@ -26,7 +26,7 @@ from rampart.core.execution import (
 )
 
 if TYPE_CHECKING:
-    from rampart.core.result import Result
+    from rampart.core.result import PopulationResult, Result
 
 _active_collector: ContextVar[ResultCollector | None] = ContextVar(
     "_active_collector",
@@ -59,13 +59,14 @@ def deactivate_collector(token: Token[ResultCollector | None]) -> None:
 
 
 class ResultCollector:
-    """Accumulates Result objects produced during a single test.
+    """Accumulates results and populations produced during a single test.
 
     Framework-internal. Never referenced by test authors.
     """
 
     def __init__(self) -> None:
         self._results: list[Result] = []
+        self._populations: list[PopulationResult] = []
 
     def record(self, *, result: Result) -> None:
         """Record a result.
@@ -80,29 +81,48 @@ class ResultCollector:
         """All results recorded so far."""
         return list(self._results)
 
+    def record_population(self, *, population: PopulationResult) -> None:
+        """Record a completed population aggregate.
+
+        Args:
+            population (PopulationResult): The completed population.
+        """
+        self._populations.append(population)
+
+    @property
+    def populations(self) -> list[PopulationResult]:
+        """All population aggregates recorded so far."""
+        return list(self._populations)
+
 
 class ResultCollectionHandler(ExecutionEventHandler):
     """Default ExecutionEventHandler installed on every BaseExecution.
 
-    Writes the Result into the active per-test collector on
-    ON_POST_EXECUTE. No-op for all other events. No-op when no
-    collector is active (safe to use outside pytest).
+    Writes individual and population results into the active per-test
+    collector on their post-execution events. No-op when no collector
+    is active (safe to use outside pytest).
     """
 
     @override
     async def on_event(self, *, event_data: ExecutionEventData) -> None:
-        """Record result on post-execute. Ignore all other events.
+        """Record completed individual or population results.
 
         Args:
             event_data (ExecutionEventData): The event data.
         """
-        if event_data.event is not ExecutionEvent.ON_POST_EXECUTE:
-            return
-        if event_data.result is None:
-            return
         collector = _active_collector.get()
-        if collector is not None:
+        if collector is None:
+            return
+        if (
+            event_data.event is ExecutionEvent.ON_POST_EXECUTE
+            and event_data.result is not None
+        ):
             collector.record(result=event_data.result)
+        elif (
+            event_data.event is ExecutionEvent.ON_POST_POPULATION
+            and event_data.population is not None
+        ):
+            collector.record_population(population=event_data.population)
 
 
 def record_result(result: Result) -> None:
