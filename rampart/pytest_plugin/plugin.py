@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import warnings
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
@@ -40,6 +41,13 @@ from rampart.pytest_plugin._collection import (
     deactivate_collector,
 )
 from rampart.pytest_plugin._session import RampartSession
+from rampart.pytest_plugin._trial import (
+    TRIALS_OPTION,
+    TrialConfig,
+    TrialMismatchWarning,
+    parse_positive_int,
+    resolve_trial_config,
+)
 from rampart.pytest_plugin._xdist import (
     DEFAULT_SIZE_LIMIT_BYTES,
     SIZE_LIMIT_OPTION,
@@ -69,6 +77,7 @@ __all__ = [
     "pytest_terminal_summary",
     "pytest_testnodedown",
     "pytest_unconfigure",
+    "trial_config",
 ]
 
 _rampart_key = pytest.StashKey[RampartSession]()
@@ -118,6 +127,14 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         parser (pytest.Parser): The pytest argument parser.
     """
     group = parser.getgroup("rampart")
+    group.addoption(
+        "--rampart-trials",
+        dest=TRIALS_OPTION,
+        type=parse_positive_int,
+        default=None,
+        metavar="N",
+        help="Override the execution count for @pytest.mark.trial populations.",
+    )
     group.addoption(
         f"--{SIZE_LIMIT_OPTION.replace('_', '-')}",
         dest=SIZE_LIMIT_OPTION,
@@ -204,6 +221,82 @@ def _absorb_results(
         )
 
 
+@pytest.fixture
+def trial_config(request: pytest.FixtureRequest) -> TrialConfig:
+    """Resolve the current test's trial declaration and CLI override.
+
+    Args:
+        request (pytest.FixtureRequest): Current pytest fixture request.
+
+    Returns:
+        TrialConfig: Effective trial count and declared threshold.
+    """
+    return resolve_trial_config(
+        node=cast("pytest.Item", request.node),
+        config=request.config,
+    )
+
+
+def _warn_trial_mismatches(
+    *,
+    node: pytest.Item,
+    config: pytest.Config,
+    collector: ResultCollector,
+) -> None:
+    """Warn when executed populations disagree with the resolved declaration.
+
+    Args:
+        node (pytest.Item): Test item that executed the populations.
+        config (pytest.Config): Active pytest configuration.
+        collector (ResultCollector): Collector containing completed populations.
+    """
+    if not collector.populations or node.get_closest_marker("trial") is None:
+        return
+    resolved = resolve_trial_config(node=node, config=config)
+    for population in collector.populations:
+        if (
+            population.total_count == resolved.n
+            and population.threshold == resolved.threshold
+        ):
+            continue
+        warnings.warn(
+            (
+                f"{node.nodeid} declared trial(n={resolved.n}, "
+                f"threshold={resolved.threshold:g}) but executed "
+                f"n={population.total_count}, "
+                f"threshold={population.threshold:g}"
+            ),
+            TrialMismatchWarning,
+            stacklevel=2,
+        )
+
+
+def _annotate_trial_results(
+    *,
+    node: pytest.Item,
+    config: pytest.Config,
+    collector: ResultCollector,
+) -> None:
+    """Add the effective trial declaration to result report metadata.
+
+    Args:
+        node (pytest.Item): Test item that produced the results.
+        config (pytest.Config): Active pytest configuration.
+        collector (ResultCollector): Collector containing individual results.
+    """
+    if not collector.results or node.get_closest_marker("trial") is None:
+        return
+    resolved = resolve_trial_config(node=node, config=config)
+    for result in collector.results:
+        result.metadata = {
+            **result.metadata,
+            "_rampart_trial": {
+                "n": resolved.n,
+                "threshold": resolved.threshold,
+            },
+        }
+
+
 @pytest.fixture(autouse=True)
 def _rampart_collect(  # pytest discovers this via autouse=True
     request: pytest.FixtureRequest,
@@ -228,8 +321,18 @@ def _rampart_collect(  # pytest discovers this via autouse=True
     token = activate_collector(collector)
     yield
     deactivate_collector(token)
+    _annotate_trial_results(
+        node=node,
+        config=request.config,
+        collector=collector,
+    )
     if rampart_session is not None:
         _absorb_results(rampart_session=rampart_session, node=node, collector=collector)
+    _warn_trial_mismatches(
+        node=node,
+        config=request.config,
+        collector=collector,
+    )
 
     # Note: collector.results returns a copy of the internal list,
     # so reading it after deactivation and absorption is safe.
