@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -21,6 +22,9 @@ from rampart.core.result import PopulationResult, Result, SafetyStatus
 from rampart.core.types import EvalContext, Request, Response, Turn
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+    from typing import Any
+
     from rampart.core.adapter import AgentAdapter
     from rampart.core.evaluator import Evaluator
     from rampart.core.manifest import AppManifest
@@ -214,7 +218,12 @@ class BaseExecution(ABC):
         """
         ...
 
-    async def execute_async(self, *, adapter: AgentAdapter) -> Result:
+    async def execute_async(
+        self,
+        *,
+        adapter: AgentAdapter,
+        additional_result_metadata: Mapping[str, Any] | None = None,
+    ) -> Result:
         """Execute the safety test.
 
         Fires lifecycle events and delegates to _execute_async for
@@ -226,9 +235,17 @@ class BaseExecution(ABC):
 
         Args:
             adapter (AgentAdapter): The agent to test.
+            additional_result_metadata (Mapping[str, Any] | None): Metadata to
+                add to the result before ON_POST_EXECUTE. Existing result
+                metadata cannot be overwritten. Keys beginning with
+                ``_rampart_`` are conventionally used by the framework.
 
         Returns:
             Result: Safety verdict with evidence and diagnostics.
+
+        Raises:
+            ValueError: If additional_result_metadata contains a key already
+                present in the result metadata.
         """
         start = time.monotonic()
         await self._fire(
@@ -265,6 +282,10 @@ class BaseExecution(ABC):
 
         elapsed = time.monotonic() - start
         result.duration_seconds = elapsed
+        self._add_result_metadata(
+            result=result,
+            additional_result_metadata=additional_result_metadata,
+        )
         await self._fire(
             ExecutionEvent.ON_POST_EXECUTE,
             adapter=adapter,
@@ -315,9 +336,20 @@ class BaseExecution(ABC):
             msg = "threshold must be between 0.0 and 1.0"
             raise ValueError(msg)
 
+        population_id = uuid.uuid4().hex
         results: list[Result] = []
-        for _ in range(n):
-            result = await self.execute_async(adapter=adapter)
+        for index in range(n):
+            result = await self.execute_async(
+                adapter=adapter,
+                additional_result_metadata={
+                    "_rampart_population": {
+                        "id": population_id,
+                        "index": index,
+                        "size": n,
+                        "threshold": threshold,
+                    },
+                },
+            )
             results.append(result)
 
         return PopulationResult(
@@ -336,6 +368,28 @@ class BaseExecution(ABC):
             Result: Safety verdict.
         """
         ...
+
+    @staticmethod
+    def _add_result_metadata(
+        *,
+        result: Result,
+        additional_result_metadata: Mapping[str, Any] | None,
+    ) -> None:
+        """Add metadata without overwriting keys produced by the execution.
+
+        Raises:
+            ValueError: If an additional metadata key already exists.
+        """
+        if not additional_result_metadata:
+            return
+
+        duplicate_keys = result.metadata.keys() & additional_result_metadata.keys()
+        if duplicate_keys:
+            formatted_keys = ", ".join(sorted(duplicate_keys))
+            msg = f"Result metadata already contains key(s): {formatted_keys}"
+            raise ValueError(msg)
+
+        result.metadata = {**result.metadata, **additional_result_metadata}
 
     async def _fire(
         self,

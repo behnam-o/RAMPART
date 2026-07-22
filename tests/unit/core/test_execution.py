@@ -76,6 +76,24 @@ class _SuccessExecution(BaseExecution):
         return Result(safe=True, status=SafetyStatus.SAFE, summary="ok")
 
 
+class _MetadataExecution(BaseExecution):
+    """Execution that returns existing result metadata."""
+
+    @property
+    def strategy_name(self) -> str:
+        """Test strategy name."""
+        return "metadata"
+
+    async def _execute_async(self, *, adapter: AgentAdapter) -> Result:
+        """Return a safe result with metadata."""
+        return Result(
+            safe=True,
+            status=SafetyStatus.SAFE,
+            summary="ok",
+            metadata={"existing": "value"},
+        )
+
+
 class _InfraErrorExecution(BaseExecution):
     """Execution that raises InfrastructureError."""
 
@@ -157,6 +175,44 @@ class TestBaseExecutionLifecycle:
         post = handler.events[1]
         assert post.elapsed_seconds >= 0.0
 
+    async def test_additional_metadata_is_present_on_post_execute_async(self) -> None:
+        handler = _RecordingHandler()
+        execution = _SuccessExecution(event_handlers=[handler])
+
+        result = await execution.execute_async(
+            adapter=_StubAdapter(),
+            additional_result_metadata={"correlation_id": "run-1"},
+        )
+
+        assert result.metadata == {"correlation_id": "run-1"}
+        assert handler.events[1].result is result
+        assert handler.events[1].result.metadata == {"correlation_id": "run-1"}
+
+    async def test_rejects_duplicate_additional_metadata_async(self) -> None:
+        handler = _RecordingHandler()
+        execution = _MetadataExecution(event_handlers=[handler])
+
+        with pytest.raises(ValueError, match=r"already contains key.*existing"):
+            await execution.execute_async(
+                adapter=_StubAdapter(),
+                additional_result_metadata={"existing": "replacement"},
+            )
+
+        assert [event.event for event in handler.events] == [
+            ExecutionEvent.ON_PRE_EXECUTE,
+        ]
+
+    async def test_additional_metadata_is_attached_to_error_result_async(self) -> None:
+        execution = _InfraErrorExecution()
+
+        result = await execution.execute_async(
+            adapter=_StubAdapter(),
+            additional_result_metadata={"correlation_id": "run-1"},
+        )
+
+        assert result.status is SafetyStatus.ERROR
+        assert result.metadata["correlation_id"] == "run-1"
+
 
 class TestExecuteTrials:
     async def test_returns_population_result_async(self) -> None:
@@ -187,6 +243,48 @@ class TestExecuteTrials:
             ExecutionEvent.ON_PRE_EXECUTE,
             ExecutionEvent.ON_POST_EXECUTE,
         ] * 3
+
+    async def test_attaches_population_metadata_before_post_execute_async(self) -> None:
+        handler = _RecordingHandler()
+        execution = _SuccessExecution(event_handlers=[handler])
+
+        population = await execution.execute_trials_async(
+            adapter=_StubAdapter(),
+            n=3,
+            threshold=0.8,
+        )
+
+        metadata = [
+            result.metadata["_rampart_population"] for result in population.results
+        ]
+        assert len({item["id"] for item in metadata}) == 1
+        assert [item["index"] for item in metadata] == [0, 1, 2]
+        assert all(item["size"] == 3 for item in metadata)
+        assert [item["threshold"] for item in metadata] == pytest.approx([0.8] * 3)
+        post_metadata = []
+        for event in handler.events:
+            if event.event is ExecutionEvent.ON_POST_EXECUTE:
+                assert event.result is not None
+                post_metadata.append(event.result.metadata["_rampart_population"])
+        assert post_metadata == metadata
+
+    async def test_separate_populations_have_distinct_ids_async(self) -> None:
+        execution = _SuccessExecution()
+
+        first = await execution.execute_trials_async(
+            adapter=_StubAdapter(),
+            n=1,
+            threshold=1.0,
+        )
+        second = await execution.execute_trials_async(
+            adapter=_StubAdapter(),
+            n=1,
+            threshold=1.0,
+        )
+
+        first_id = first.results[0].metadata["_rampart_population"]["id"]
+        second_id = second.results[0].metadata["_rampart_population"]["id"]
+        assert first_id != second_id
 
     async def test_rejects_non_positive_trial_count_async(self) -> None:
         execution = _SuccessExecution()
