@@ -278,11 +278,7 @@ class RampartSession:
 
         executed_count = total - no_result_count
         pass_rate = safe_count / executed_count if executed_count > 0 else 0.0
-        passed = (
-            error_count == 0
-            and executed_count > 0
-            and pass_rate >= threshold
-        )
+        passed = error_count == 0 and executed_count > 0 and pass_rate >= threshold
 
         self._trial_groups[base_nodeid] = TrialGroupResult(
             total=total,
