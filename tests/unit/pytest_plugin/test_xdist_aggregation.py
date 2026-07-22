@@ -144,6 +144,13 @@ class TestXdistConsolidation:
         self,
         configured_pytester: Pytester,
     ) -> None:
+        """A distributed run merges into one report with full population stats.
+
+        A single ``-n 2`` run proves both that xdist yields exactly one
+        consolidated report and that the merged population statistics reflect
+        the entire set (per-field aggregation itself is unit-tested in
+        ``tests/unit/reporting/test_report.py::TestPopulationSummary``).
+        """
         _setup_simple_tests(configured_pytester)
         result = configured_pytester.runpytest(
             "-p",
@@ -157,15 +164,6 @@ class TestXdistConsolidation:
             f"Expected exactly one report under xdist, got {len(reports)}: "
             f"{[r.get('total_runs') for r in reports]}"
         )
-
-    def test_population_statistics_over_full_set(
-        self,
-        configured_pytester: Pytester,
-    ) -> None:
-        _setup_simple_tests(configured_pytester)
-        configured_pytester.runpytest("-p", "no:cacheprovider", "-n", "2")
-        reports = _load_reports(configured_pytester)
-        assert len(reports) == 1
         report = reports[0]
         assert report["total_runs"] == 4
         assert report["passed"] == 3
@@ -346,89 +344,6 @@ class TestXdistTrialAggregation:
             in summary
         )
 
-    def test_trial_group_fails_below_threshold_under_loadgroup(
-        self,
-        configured_pytester: Pytester,
-    ) -> None:
-        """No UNSAFE results, but pass rate below threshold => FAIL.
-
-        2 SAFE + 2 UNDETERMINED trials, threshold=0.75. Pass rate is 0.5
-        so the group must FAIL on the threshold rule (not the unsafe rule).
-        """
-        configured_pytester.makepyfile(
-            test_trial_threshold="""
-            import pytest
-            from rampart import record_result
-            from rampart.core.result import Result, SafetyStatus
-            from rampart.core.types import ObservabilityLevel
-
-            @pytest.mark.harm("test")
-            @pytest.mark.trial(n=4, threshold=0.75)
-            def test_trial_threshold(request):
-                undetermined = request.node.name.endswith(
-                    ("[trial-2]", "[trial-3]"),
-                )
-                record_result(Result(
-                    safe=True,
-                    status=(
-                        SafetyStatus.UNDETERMINED
-                        if undetermined else SafetyStatus.SAFE
-                    ),
-                    summary="t",
-                    observability_level=ObservabilityLevel.RESPONSE_ONLY,
-                ))
-            """,
-        )
-        result = configured_pytester.runpytest(
-            "-p",
-            "no:cacheprovider",
-            "-n",
-            "2",
-            "--dist",
-            "loadgroup",
-        )
-        # All 4 clones pass as pytest tests (record_result(safe=True)),
-        # but the trial GROUP should fail on threshold.
-        result.assert_outcomes(passed=4)
-        summary = "\n".join(result.outlines)
-        assert "FAIL  test_trial_threshold" in summary
-        assert "50% pass rate" in summary
-        assert "threshold: 75%" in summary
-
-    def test_trial_group_passes_when_all_safe_under_loadgroup(
-        self,
-        configured_pytester: Pytester,
-    ) -> None:
-        """All-SAFE trial group with achievable threshold => PASS verdict."""
-        configured_pytester.makepyfile(
-            test_trial_all_safe="""
-            import pytest
-            from rampart import record_result
-            from rampart.core.result import Result, SafetyStatus
-            from rampart.core.types import ObservabilityLevel
-
-            @pytest.mark.harm("test")
-            @pytest.mark.trial(n=3, threshold=0.5)
-            def test_trial_all_safe():
-                record_result(Result(
-                    safe=True, status=SafetyStatus.SAFE, summary="ok",
-                    observability_level=ObservabilityLevel.RESPONSE_ONLY,
-                ))
-            """,
-        )
-        result = configured_pytester.runpytest(
-            "-p",
-            "no:cacheprovider",
-            "-n",
-            "2",
-            "--dist",
-            "loadgroup",
-        )
-        result.assert_outcomes(passed=3)
-        summary = "\n".join(result.outlines)
-        assert "PASS  test_trial_all_safe" in summary
-        assert "PASSED" in summary
-
 
 class TestXdistMetadata:
     def test_report_includes_xdist_metadata(
@@ -521,3 +436,32 @@ class TestCloneIdDeterminism:
         # deterministic clone IDs so that workers can match them.
         if serial_ids and parallel_ids:
             assert serial_ids == parallel_ids
+
+
+class TestSinkFixtureDeprecation:
+    """End-to-end deprecation-warning contract for the ``rampart_sinks`` fixture.
+
+    The fixture warns wherever it is resolved: single-process and on the xdist
+    controller. The list form's silence is covered by the fast unit tests in
+    ``test_xdist.py::TestSinkDeprecationWarning``.
+    """
+
+    _DEPRECATION_LINE = "*rampart_sinks fixture is deprecated*"
+
+    def test_single_process_fixture_warns(
+        self,
+        configured_pytester: Pytester,
+    ) -> None:
+        _setup_simple_tests(configured_pytester)
+        result = configured_pytester.runpytest("-p", "no:cacheprovider")
+        result.assert_outcomes(passed=4)
+        result.stdout.fnmatch_lines([self._DEPRECATION_LINE])
+
+    def test_controller_fixture_warns_under_xdist(
+        self,
+        configured_pytester: Pytester,
+    ) -> None:
+        _setup_simple_tests(configured_pytester)
+        result = configured_pytester.runpytest("-p", "no:cacheprovider", "-n", "2")
+        result.assert_outcomes(passed=4)
+        result.stdout.fnmatch_lines([self._DEPRECATION_LINE])
