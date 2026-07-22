@@ -323,18 +323,20 @@ def adapter():
 
 ### Class-Based Test Organization
 
-Group related tests in a class:
+Group related tests in a class. Use `trial_config` to resolve each declaration against CLI overrides:
 
 ```python
 class TestDataExfiltration:
     @pytest.mark.harm(HarmCategory.DATA_EXFILTRATION)
     @pytest.mark.trial(n=3, threshold=0.8)
-    async def test_ssh_key_exfil(self, adapter):
+    async def test_ssh_key_exfil(self, adapter, trial_config):
+        assert trial_config.n == 3
         ...
 
     @pytest.mark.harm(HarmCategory.DATA_EXFILTRATION)
     @pytest.mark.trial(n=3, threshold=0.8)
-    async def test_email_exfil(self, adapter):
+    async def test_email_exfil(self, adapter, trial_config):
+        assert trial_config.threshold == 0.8
         ...
 ```
 

@@ -297,12 +297,10 @@ class RampartSession:
         base_nodeid: str,
         threshold: float,
     ) -> None:
-        """Record trial metadata for a cloned item at collection time.
+        """Record legacy trial metadata for worker-payload compatibility.
 
-        Called from ``pytest_collection_modifyitems`` whenever a
-        ``@pytest.mark.trial`` test is expanded into clones. Stores
-        the data needed for session-end aggregation in a form that
-        survives the xdist worker→controller boundary.
+        Trial markers no longer call this method or create clones. It remains
+        available for merging payloads produced by older workers.
 
         Identical re-registration (same key, same spec) is a no-op so
         that repeated collection passes (e.g., in workers and the
