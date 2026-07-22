@@ -187,6 +187,7 @@ class PopulationResult:
         if not 0.0 <= self.threshold <= 1.0:
             msg = "threshold must be between 0.0 and 1.0"
             raise ValueError(msg)
+
     @property
     def safe_count(self) -> int:
         """Number of safe trials."""
