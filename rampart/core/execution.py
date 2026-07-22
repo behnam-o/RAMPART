@@ -288,6 +288,10 @@ class BaseExecution(ABC):
         strategies are responsible for creating a fresh agent session during
         each call to ``execute_async``.
 
+        Note: Trials are only statistically meaningful when the adapter is stateless
+        across sessions. a stateful adapter (e.g. memory-backed) makes pass_rate an
+        unreliable estimate.
+
         Args:
             adapter (AgentAdapter): The agent to test.
             n (int): Number of independent trials to execute.
