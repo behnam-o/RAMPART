@@ -302,7 +302,7 @@ class BaseExecution(ABC):
                 [0.0, 1.0].
         """
         if not isinstance(n, int) or isinstance(n, bool):
-            msg = "n must be an integer"
+            msg = "n must be a non-boolean integer"
             raise TypeError(msg)
         if n < 1:
             msg = "n must be greater than or equal to 1"

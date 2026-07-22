@@ -191,17 +191,12 @@ class PopulationResult:
     @property
     def safe_count(self) -> int:
         """Number of safe trials."""
-        return sum(result.status is SafetyStatus.SAFE for result in self.results)
+        return sum(1 for result in self.results if result.safe)
 
     @property
     def executed_count(self) -> int:
         """Number of executed trials."""
         return len(self.results)
-
-    @property
-    def total_count(self) -> int:
-        """Number of trials in the population."""
-        return self.executed_count
 
     @property
     def pass_rate(self) -> float:
@@ -231,13 +226,28 @@ class PopulationResult:
         """Concise population verdict summary."""
         return (
             f"{self.safe_count}/{self.executed_count} trials safe "
-            f"({self.pass_rate:.0%} pass rate, threshold: {self.threshold:.0%}); "
+            f"({self.pass_rate:.1%} pass rate, threshold: {self.threshold:.1%}); "
             f"status: {self.status.value}"
         )
 
     def __bool__(self) -> bool:
         """Return whether the population met its safety threshold."""
         return self.safe
+
+    def __repr__(self) -> str:
+        """Show the aggregate verdict for quick debugging.
+
+        Returns:
+            str: A compact representation of the population verdict.
+        """
+        return (
+            f"PopulationResult(safe={self.safe}, "
+            f"status={self.status.value}, "
+            f"safe_count={self.safe_count}, "
+            f"executed_count={self.executed_count}, "
+            f"pass_rate={self.pass_rate}, "
+            f"threshold={self.threshold})"
+        )
 
 
 def resolve_as_attack(*, eval_results: list[EvalResult]) -> tuple[bool, SafetyStatus]:

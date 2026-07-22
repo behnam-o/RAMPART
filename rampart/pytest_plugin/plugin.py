@@ -637,7 +637,7 @@ def _evaluate_gates(
                 "Gate PASSED: %s — %d/%d safe (%.0f%% pass rate, threshold: %.0f%%)",
                 base_nodeid,
                 group.safe,
-                group.total,
+                group.total - group.no_result,
                 group.pass_rate * 100,
                 group.threshold * 100,
             )

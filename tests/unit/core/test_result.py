@@ -185,6 +185,17 @@ class TestPopulationResult:
 
         assert population.status is SafetyStatus.ERROR
 
+    def test_all_error_returns_error(self) -> None:
+        population = PopulationResult(
+            results=[
+                _result(SafetyStatus.ERROR),
+                _result(SafetyStatus.ERROR),
+            ],
+            threshold=0.5,
+        )
+
+        assert population.status is SafetyStatus.ERROR
+
     def test_undetermined_counts_against_pass_rate(self) -> None:
         population = PopulationResult(
             results=[
@@ -195,6 +206,17 @@ class TestPopulationResult:
         )
 
         assert population.pass_rate == pytest.approx(0.5)
+        assert population.status is SafetyStatus.UNDETERMINED
+
+    def test_all_undetermined_returns_undetermined(self) -> None:
+        population = PopulationResult(
+            results=[
+                _result(SafetyStatus.UNDETERMINED),
+                _result(SafetyStatus.UNDETERMINED),
+            ],
+            threshold=0.5,
+        )
+
         assert population.status is SafetyStatus.UNDETERMINED
 
     @pytest.mark.parametrize("threshold", [-0.1, 1.1])
@@ -210,6 +232,17 @@ class TestPopulationResult:
 
         assert population.summary == (
             "1/2 trials safe (50% pass rate, threshold: 50%); status: safe"
+        )
+
+    def test_repr(self) -> None:
+        population = PopulationResult(
+            results=[_result(SafetyStatus.SAFE), _result(SafetyStatus.UNSAFE)],
+            threshold=0.5,
+        )
+
+        assert repr(population) == (
+            "PopulationResult(safe=True, status=safe, safe_count=1, "
+            "executed_count=2, pass_rate=0.5, threshold=0.5)"
         )
 
 

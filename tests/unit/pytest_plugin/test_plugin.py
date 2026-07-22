@@ -233,6 +233,39 @@ class TestRampartSession:
         assert group.pass_rate == pytest.approx(0.0)
         assert not group.passed
 
+    def test_record_trial_group_error_takes_precedence_over_unsafe(self) -> None:
+        session = RampartSession()
+        mixed_item = MagicMock()
+        mixed_item.nodeid = "test_file.py::test_mixed[trial-0]"
+        mixed_collector = ResultCollector()
+        mixed_collector.record(
+            result=Result(safe=False, status=SafetyStatus.UNSAFE, summary="unsafe"),
+        )
+        mixed_collector.record(
+            result=Result(safe=False, status=SafetyStatus.ERROR, summary="error"),
+        )
+        session.absorb(node=mixed_item, collector=mixed_collector)
+
+        safe_item = MagicMock()
+        safe_item.nodeid = "test_file.py::test_mixed[trial-1]"
+        safe_collector = ResultCollector()
+        safe_collector.record(
+            result=Result(safe=True, status=SafetyStatus.SAFE, summary="safe"),
+        )
+        session.absorb(node=safe_item, collector=safe_collector)
+
+        session.record_trial_group(
+            base_nodeid="test_mixed",
+            clone_nodeids=[mixed_item.nodeid, safe_item.nodeid],
+            threshold=0.5,
+        )
+
+        group = session.trial_groups["test_mixed"]
+        assert group.errors == 1
+        assert group.unsafe == 0
+        assert group.pass_rate == pytest.approx(0.5)
+        assert not group.passed
+
     def test_record_trial_group_excludes_no_result_from_denominator(self) -> None:
         session = RampartSession()
         item = MagicMock()
@@ -848,6 +881,29 @@ class TestTrialGroupRendering:
 
 class TestEvaluateGates:
     """Gate evaluation logs when threshold is exceeded."""
+
+    def test_pass_log_uses_executed_count_denominator(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        session = RampartSession()
+        item = MagicMock()
+        item.nodeid = "test.py::test_gate[trial-0]"
+        collector = ResultCollector()
+        collector.record(
+            result=Result(safe=True, status=SafetyStatus.SAFE, summary="safe"),
+        )
+        session.absorb(node=item, collector=collector)
+        session.record_trial_group(
+            base_nodeid="test.py::test_gate",
+            clone_nodeids=[item.nodeid, "test.py::test_gate[trial-1]"],
+            threshold=1.0,
+        )
+
+        with caplog.at_level("INFO"):
+            _evaluate_gates(rampart_session=session)
+
+        assert "1/1 safe (100% pass rate" in caplog.text
 
     def test_logs_when_rate_exceeds_threshold(self) -> None:
         session = RampartSession()
