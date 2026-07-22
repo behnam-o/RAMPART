@@ -300,7 +300,7 @@ class TestExecuteTrials:
     async def test_rejects_invalid_trial_count_type_async(self, n: object) -> None:
         execution = _SuccessExecution()
 
-        with pytest.raises(TypeError, match="n must be an integer"):
+        with pytest.raises(TypeError, match="n must be a non-boolean integer"):
             await execution.execute_trials_async(
                 adapter=_StubAdapter(),
                 n=n,  # ty: ignore[invalid-argument-type]

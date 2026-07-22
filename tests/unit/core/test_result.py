@@ -231,7 +231,7 @@ class TestPopulationResult:
         )
 
         assert population.summary == (
-            "1/2 trials safe (50% pass rate, threshold: 50%); status: safe"
+            "1/2 trials safe (50.0% pass rate, threshold: 50.0%); status: safe"
         )
 
     def test_repr(self) -> None:
