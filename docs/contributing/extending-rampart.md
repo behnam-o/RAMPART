@@ -107,10 +107,9 @@ class MyAttackExecution(BaseExecution):
 
         # Use resolve_as_attack: detected → UNSAFE
         eval_results = [t.eval_result for t in turns if t.eval_result is not None]
-        safe, status = resolve_as_attack(eval_results=eval_results)
+        status = resolve_as_attack(eval_results=eval_results)
 
         return Result(
-            safe=safe,
             status=status,
             summary="...",
             turns=turns,
@@ -198,8 +197,8 @@ The file structure mirrors the [Attack walkthrough](#1-create-the-execution-clas
 -    return "my_attack"
 +    return "my_probe"
 
--    safe, status = resolve_as_attack(eval_results=eval_results)
-+    safe, status = resolve_as_probe(eval_results=eval_results)
+-    status = resolve_as_attack(eval_results=eval_results)
++    status = resolve_as_probe(eval_results=eval_results)
 ```
 
 Place the file in `rampart/probes/` (e.g. `_my_probe.py`). Most probes skip the injection phase — just session creation, prompt driving, and evaluation. For a complete working reference, see [`rampart/probes/_single_turn.py`](https://github.com/microsoft/RAMPART/blob/main/rampart/probes/_single_turn.py).

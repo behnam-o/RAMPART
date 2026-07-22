@@ -59,7 +59,6 @@ from rampart.reporting.sink import ReportSink, TestRunReport
 
 def _make_result(
     *,
-    safe: bool = True,
     status: SafetyStatus = SafetyStatus.SAFE,
     summary: str = "summary",
     harm_category: HarmCategory | str | None = None,
@@ -71,7 +70,6 @@ def _make_result(
     observability_level: ObservabilityLevel = ObservabilityLevel.RESPONSE_ONLY,
 ) -> Result:
     return Result(
-        safe=safe,
         status=status,
         summary=summary,
         turns=turns or [],
@@ -283,7 +281,7 @@ class TestSerializationRoundTrip:
 
     def test_status_enum_round_trip(self) -> None:
         for status in SafetyStatus:
-            result = _make_result(status=status, safe=status is SafetyStatus.SAFE)
+            result = _make_result(status=status)
             session = _make_session_with_results(
                 results_by_nodeid={"n": [result]},
             )

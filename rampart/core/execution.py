@@ -255,7 +255,6 @@ class BaseExecution(ABC):
             )
 
             result = Result(
-                safe=False,
                 status=SafetyStatus.ERROR,
                 summary=f"{error_type}: {exc}",
                 strategy=self.strategy_name,

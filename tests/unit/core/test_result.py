@@ -79,19 +79,18 @@ class TestInjectionRecord:
 
 class TestResult:
     def test_bool_returns_safe_true(self) -> None:
-        r = Result(safe=True, status=SafetyStatus.SAFE, summary="ok")
+        r = Result(status=SafetyStatus.SAFE, summary="ok")
         assert bool(r) is True
 
     def test_bool_returns_safe_false(self) -> None:
-        r = Result(safe=False, status=SafetyStatus.UNSAFE, summary="bad")
+        r = Result(status=SafetyStatus.UNSAFE, summary="bad")
         assert bool(r) is False
 
     def test_assert_safe_pattern(self) -> None:
-        safe_result = Result(safe=True, status=SafetyStatus.SAFE, summary="ok")
+        safe_result = Result(status=SafetyStatus.SAFE, summary="ok")
         assert safe_result, safe_result.summary
 
         unsafe_result = Result(
-            safe=False,
             status=SafetyStatus.UNSAFE,
             summary="attack detected",
         )
@@ -99,13 +98,13 @@ class TestResult:
             assert unsafe_result, unsafe_result.summary
 
     def test_repr(self) -> None:
-        r = Result(safe=True, status=SafetyStatus.SAFE, summary="Agent defended")
+        r = Result(status=SafetyStatus.SAFE, summary="Agent defended")
         assert "safe=True" in repr(r)
         assert "safe" in repr(r)
         assert "Agent defended" in repr(r)
 
     def test_defaults(self) -> None:
-        r = Result(safe=True, status=SafetyStatus.SAFE, summary="ok")
+        r = Result(status=SafetyStatus.SAFE, summary="ok")
         assert r.turns == []
         assert r.eval_results == []
         assert r.duration_seconds == pytest.approx(0.0)
@@ -117,7 +116,6 @@ class TestResult:
 
     def test_harm_category_accepts_enum(self) -> None:
         r = Result(
-            safe=True,
             status=SafetyStatus.SAFE,
             summary="ok",
             harm_category=HarmCategory.DATA_EXFILTRATION,
@@ -127,7 +125,6 @@ class TestResult:
 
     def test_harm_category_accepts_plain_string(self) -> None:
         r = Result(
-            safe=True,
             status=SafetyStatus.SAFE,
             summary="ok",
             harm_category="custom_product_risk",
@@ -139,7 +136,7 @@ class TestResultEvalResultsProperty:
     """eval_results is a property derived from turns."""
 
     def test_empty_turns_gives_empty_eval_results(self) -> None:
-        r = Result(safe=True, status=SafetyStatus.SAFE, summary="ok")
+        r = Result(status=SafetyStatus.SAFE, summary="ok")
         assert r.eval_results == []
 
     def test_turns_with_eval_results_returned_in_order(self) -> None:
@@ -158,7 +155,6 @@ class TestResultEvalResultsProperty:
             ),
         ]
         r = Result(
-            safe=False,
             status=SafetyStatus.UNSAFE,
             summary="bad",
             turns=turns,
@@ -179,7 +175,6 @@ class TestResultEvalResultsProperty:
             ),
         ]
         r = Result(
-            safe=False,
             status=SafetyStatus.UNSAFE,
             summary="bad",
             turns=turns,
@@ -189,115 +184,101 @@ class TestResultEvalResultsProperty:
 
 class TestResolveAsAttack:
     def test_empty_returns_error(self) -> None:
-        safe, status = resolve_as_attack(eval_results=[])
-        assert safe is False
+        status = resolve_as_attack(eval_results=[])
         assert status is SafetyStatus.ERROR
 
     def test_detected_returns_unsafe(self) -> None:
-        safe, status = resolve_as_attack(
+        status = resolve_as_attack(
             eval_results=[_er(EvalOutcome.DETECTED)],
         )
-        assert safe is False
         assert status is SafetyStatus.UNSAFE
 
     def test_not_detected_returns_safe(self) -> None:
-        safe, status = resolve_as_attack(
+        status = resolve_as_attack(
             eval_results=[_er(EvalOutcome.NOT_DETECTED)],
         )
-        assert safe is True
         assert status is SafetyStatus.SAFE
 
     def test_undetermined_only_returns_undetermined(self) -> None:
-        safe, status = resolve_as_attack(
+        status = resolve_as_attack(
             eval_results=[_er(EvalOutcome.UNDETERMINED)],
         )
-        assert safe is False
         assert status is SafetyStatus.UNDETERMINED
 
     def test_mixed_detected_and_undetermined_returns_unsafe(self) -> None:
-        safe, status = resolve_as_attack(
+        status = resolve_as_attack(
             eval_results=[
                 _er(EvalOutcome.UNDETERMINED),
                 _er(EvalOutcome.DETECTED),
             ],
         )
-        assert safe is False
         assert status is SafetyStatus.UNSAFE
 
     def test_mixed_not_detected_and_undetermined_returns_undetermined(self) -> None:
-        safe, status = resolve_as_attack(
+        status = resolve_as_attack(
             eval_results=[
                 _er(EvalOutcome.NOT_DETECTED),
                 _er(EvalOutcome.UNDETERMINED),
             ],
         )
-        assert safe is False
         assert status is SafetyStatus.UNDETERMINED
 
     def test_all_not_detected_returns_safe(self) -> None:
-        safe, status = resolve_as_attack(
+        status = resolve_as_attack(
             eval_results=[
                 _er(EvalOutcome.NOT_DETECTED),
                 _er(EvalOutcome.NOT_DETECTED),
             ],
         )
-        assert safe is True
         assert status is SafetyStatus.SAFE
 
 
 class TestResolveAsProbe:
     def test_empty_returns_error(self) -> None:
-        safe, status = resolve_as_probe(eval_results=[])
-        assert safe is False
+        status = resolve_as_probe(eval_results=[])
         assert status is SafetyStatus.ERROR
 
     def test_detected_returns_safe(self) -> None:
-        safe, status = resolve_as_probe(
+        status = resolve_as_probe(
             eval_results=[_er(EvalOutcome.DETECTED)],
         )
-        assert safe is True
         assert status is SafetyStatus.SAFE
 
     def test_not_detected_returns_unsafe(self) -> None:
-        safe, status = resolve_as_probe(
+        status = resolve_as_probe(
             eval_results=[_er(EvalOutcome.NOT_DETECTED)],
         )
-        assert safe is False
         assert status is SafetyStatus.UNSAFE
 
     def test_undetermined_only_returns_undetermined(self) -> None:
-        safe, status = resolve_as_probe(
+        status = resolve_as_probe(
             eval_results=[_er(EvalOutcome.UNDETERMINED)],
         )
-        assert safe is False
         assert status is SafetyStatus.UNDETERMINED
 
     def test_mixed_not_detected_and_undetermined_returns_unsafe(self) -> None:
-        safe, status = resolve_as_probe(
+        status = resolve_as_probe(
             eval_results=[
                 _er(EvalOutcome.UNDETERMINED),
                 _er(EvalOutcome.NOT_DETECTED),
             ],
         )
-        assert safe is False
         assert status is SafetyStatus.UNSAFE
 
     def test_mixed_detected_and_undetermined_returns_undetermined(self) -> None:
-        safe, status = resolve_as_probe(
+        status = resolve_as_probe(
             eval_results=[
                 _er(EvalOutcome.DETECTED),
                 _er(EvalOutcome.UNDETERMINED),
             ],
         )
-        assert safe is False
         assert status is SafetyStatus.UNDETERMINED
 
     def test_all_detected_returns_safe(self) -> None:
-        safe, status = resolve_as_probe(
+        status = resolve_as_probe(
             eval_results=[
                 _er(EvalOutcome.DETECTED),
                 _er(EvalOutcome.DETECTED),
             ],
         )
-        assert safe is True
         assert status is SafetyStatus.SAFE

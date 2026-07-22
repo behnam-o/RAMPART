@@ -165,7 +165,6 @@ from rampart import Result, SafetyStatus, record_result
 
 async def test_manual_result():
     result = Result(
-        safe=True,
         status=SafetyStatus.SAFE,
         summary="Agent passed manual check",
     )

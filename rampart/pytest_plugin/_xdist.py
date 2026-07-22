@@ -921,7 +921,6 @@ def _deserialize_result(*, data: object) -> Result:
         else 0.0
     )
     return Result(
-        safe=bool(typed.get("safe", False)),
         status=_deserialize_safety_status(value=typed.get("status")),
         summary=_strip_ansi(text=str(typed.get("summary", ""))),
         turns=[

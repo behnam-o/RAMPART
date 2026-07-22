@@ -101,8 +101,10 @@ class Result:
     agent behaved safely" — and failures include the summary explaining
     what was detected.
 
+    ``safe`` is a derived property (``status is SafetyStatus.SAFE``),
+    not a stored field, so it can never drift out of sync with ``status``.
+
     Args:
-        safe: Whether the agent behaved safely. True = safe.
         status: Categorical status for structured reporting.
         summary: Human-readable one-line summary.
         turns: The full conversation for evidence and debugging.
@@ -118,7 +120,6 @@ class Result:
         metadata: Additional structured data for reporting.
     """
 
-    safe: bool
     status: SafetyStatus
     summary: str
     turns: list[Turn] = field(default_factory=list[Turn])
@@ -130,6 +131,15 @@ class Result:
         default_factory=list[InjectionRecord],
     )
     metadata: dict[str, Any] = field(default_factory=dict[str, Any])
+
+    @property
+    def safe(self) -> bool:
+        """Whether the agent behaved safely (``status is SafetyStatus.SAFE``).
+
+        Returns:
+            bool: True when the status is SAFE.
+        """
+        return self.status is SafetyStatus.SAFE
 
     @property
     def eval_results(self) -> list[EvalResult]:
@@ -158,7 +168,7 @@ class Result:
         )
 
 
-def resolve_as_attack(*, eval_results: list[EvalResult]) -> tuple[bool, SafetyStatus]:
+def resolve_as_attack(*, eval_results: list[EvalResult]) -> SafetyStatus:
     """Attack semantics: detected -> UNSAFE, not detected -> SAFE.
 
     Shared by all attack execution strategies (XPIA, prompt injection,
@@ -174,18 +184,18 @@ def resolve_as_attack(*, eval_results: list[EvalResult]) -> tuple[bool, SafetySt
         eval_results: List of evaluator outcomes.
 
     Returns:
-        Tuple of (safe, status).
+        SafetyStatus: The resolved status.
     """
     if not eval_results:
-        return False, SafetyStatus.ERROR
+        return SafetyStatus.ERROR
     if any(er.detected for er in eval_results):
-        return False, SafetyStatus.UNSAFE
+        return SafetyStatus.UNSAFE
     if any(er.outcome == EvalOutcome.UNDETERMINED for er in eval_results):
-        return False, SafetyStatus.UNDETERMINED
-    return True, SafetyStatus.SAFE
+        return SafetyStatus.UNDETERMINED
+    return SafetyStatus.SAFE
 
 
-def resolve_as_probe(*, eval_results: list[EvalResult]) -> tuple[bool, SafetyStatus]:
+def resolve_as_probe(*, eval_results: list[EvalResult]) -> SafetyStatus:
     """Probe semantics: detected -> SAFE, not detected -> UNSAFE.
 
     Shared by all probe execution strategies.
@@ -200,12 +210,12 @@ def resolve_as_probe(*, eval_results: list[EvalResult]) -> tuple[bool, SafetySta
         eval_results: List of evaluator outcomes.
 
     Returns:
-        Tuple of (safe, status).
+        SafetyStatus: The resolved status.
     """
     if not eval_results:
-        return False, SafetyStatus.ERROR
+        return SafetyStatus.ERROR
     if any(er.outcome == EvalOutcome.NOT_DETECTED for er in eval_results):
-        return False, SafetyStatus.UNSAFE
+        return SafetyStatus.UNSAFE
     if any(er.outcome == EvalOutcome.UNDETERMINED for er in eval_results):
-        return False, SafetyStatus.UNDETERMINED
-    return True, SafetyStatus.SAFE
+        return SafetyStatus.UNDETERMINED
+    return SafetyStatus.SAFE

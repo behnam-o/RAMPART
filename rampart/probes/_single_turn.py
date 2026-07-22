@@ -98,10 +98,9 @@ class SingleTurnExecution(BaseExecution):
                     break
 
         eval_results = [t.eval_result for t in turns if t.eval_result is not None]
-        safe, status = resolve_as_probe(eval_results=eval_results)
+        status = resolve_as_probe(eval_results=eval_results)
 
         return Result(
-            safe=safe,
             status=status,
             summary=_build_summary(status=status, eval_results=eval_results),
             turns=turns,

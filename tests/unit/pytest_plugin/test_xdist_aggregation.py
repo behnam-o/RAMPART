@@ -95,14 +95,14 @@ def _setup_simple_tests(configured_pytester: Pytester) -> None:
         @pytest.mark.harm("test")
         def test_a_one():
             record_result(Result(
-                safe=True, status=SafetyStatus.SAFE, summary="a1",
+                status=SafetyStatus.SAFE, summary="a1",
                 observability_level=ObservabilityLevel.RESPONSE_ONLY,
             ))
 
         @pytest.mark.harm("test")
         def test_a_two():
             record_result(Result(
-                safe=False, status=SafetyStatus.UNSAFE, summary="a2",
+                status=SafetyStatus.UNSAFE, summary="a2",
                 observability_level=ObservabilityLevel.RESPONSE_ONLY,
             ))
         """,
@@ -115,14 +115,14 @@ def _setup_simple_tests(configured_pytester: Pytester) -> None:
         @pytest.mark.harm("test")
         def test_b_one():
             record_result(Result(
-                safe=True, status=SafetyStatus.SAFE, summary="b1",
+                status=SafetyStatus.SAFE, summary="b1",
                 observability_level=ObservabilityLevel.RESPONSE_ONLY,
             ))
 
         @pytest.mark.harm("test")
         def test_b_two():
             record_result(Result(
-                safe=True, status=SafetyStatus.SAFE, summary="b2",
+                status=SafetyStatus.SAFE, summary="b2",
                 observability_level=ObservabilityLevel.RESPONSE_ONLY,
             ))
         """,
@@ -189,7 +189,7 @@ class TestXdistTrialAggregation:
             @pytest.mark.trial(n=4, threshold=0.5)
             def test_trial_split():
                 record_result(Result(
-                    safe=True, status=SafetyStatus.SAFE, summary="t",
+                    status=SafetyStatus.SAFE, summary="t",
                     observability_level=ObservabilityLevel.RESPONSE_ONLY,
                 ))
             """,
@@ -222,7 +222,7 @@ class TestXdistTrialAggregation:
             @pytest.mark.trial(n=4, threshold=0.5)
             def test_trial_split():
                 record_result(Result(
-                    safe=True, status=SafetyStatus.SAFE, summary="t",
+                    status=SafetyStatus.SAFE, summary="t",
                     observability_level=ObservabilityLevel.RESPONSE_ONLY,
                 ))
             """,
@@ -263,7 +263,6 @@ class TestXdistTrialAggregation:
             def test_trial_mixed_load(request):
                 unsafe = request.node.name.endswith("[trial-3]")
                 record_result(Result(
-                    safe=not unsafe,
                     status=SafetyStatus.UNSAFE if unsafe else SafetyStatus.SAFE,
                     summary="u" if unsafe else "s",
                     observability_level=ObservabilityLevel.RESPONSE_ONLY,

@@ -73,7 +73,7 @@ class _SuccessExecution(BaseExecution):
 
     async def _execute_async(self, *, adapter: AgentAdapter) -> Result:
         """Return a safe result."""
-        return Result(safe=True, status=SafetyStatus.SAFE, summary="ok")
+        return Result(status=SafetyStatus.SAFE, summary="ok")
 
 
 class _InfraErrorExecution(BaseExecution):

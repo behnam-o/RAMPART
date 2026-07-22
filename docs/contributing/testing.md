@@ -78,7 +78,6 @@ Define small private helper functions at the top of test files instead of fixtur
 def _make_result(*, safe: bool = True) -> Result:
     """Build a minimal Result for testing."""
     return Result(
-        safe=safe,
         status=SafetyStatus.SAFE if safe else SafetyStatus.UNSAFE,
         summary="test",
         strategy="test",
