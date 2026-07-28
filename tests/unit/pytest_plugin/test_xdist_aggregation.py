@@ -262,7 +262,6 @@ class TestXdistTrialAggregation:
             def test_trial_mixed(request):
                 unsafe = request.node.name.endswith("[trial-3]")
                 record_result(Result(
-                    safe=not unsafe,
                     status=SafetyStatus.UNSAFE if unsafe else SafetyStatus.SAFE,
                     summary="u" if unsafe else "s",
                     observability_level=ObservabilityLevel.RESPONSE_ONLY,
