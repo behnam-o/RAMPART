@@ -237,10 +237,10 @@ class TestRampartSession:
         mixed_item.nodeid = "test_file.py::test_mixed[trial-0]"
         mixed_collector = ResultCollector()
         mixed_collector.record(
-            result=Result(safe=False, status=SafetyStatus.UNSAFE, summary="unsafe"),
+            result=Result(status=SafetyStatus.UNSAFE, summary="unsafe"),
         )
         mixed_collector.record(
-            result=Result(safe=False, status=SafetyStatus.ERROR, summary="error"),
+            result=Result(status=SafetyStatus.ERROR, summary="error"),
         )
         session.absorb(node=mixed_item, collector=mixed_collector)
 
@@ -248,7 +248,7 @@ class TestRampartSession:
         safe_item.nodeid = "test_file.py::test_mixed[trial-1]"
         safe_collector = ResultCollector()
         safe_collector.record(
-            result=Result(safe=True, status=SafetyStatus.SAFE, summary="safe"),
+            result=Result(status=SafetyStatus.SAFE, summary="safe"),
         )
         session.absorb(node=safe_item, collector=safe_collector)
 
@@ -270,7 +270,7 @@ class TestRampartSession:
         item.nodeid = "test_file.py::test_skip[trial-0]"
         collector = ResultCollector()
         collector.record(
-            result=Result(safe=True, status=SafetyStatus.SAFE, summary="safe"),
+            result=Result(status=SafetyStatus.SAFE, summary="safe"),
         )
         session.absorb(node=item, collector=collector)
 
@@ -879,7 +879,7 @@ class TestEvaluateGates:
         item.nodeid = "test.py::test_gate[trial-0]"
         collector = ResultCollector()
         collector.record(
-            result=Result(safe=True, status=SafetyStatus.SAFE, summary="safe"),
+            result=Result(status=SafetyStatus.SAFE, summary="safe"),
         )
         session.absorb(node=item, collector=collector)
         session.record_trial_group(

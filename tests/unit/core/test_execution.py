@@ -87,7 +87,6 @@ class _MetadataExecution(BaseExecution):
     async def _execute_async(self, *, adapter: AgentAdapter) -> Result:
         """Return a safe result with metadata."""
         return Result(
-            safe=True,
             status=SafetyStatus.SAFE,
             summary="ok",
             metadata={"existing": "value"},

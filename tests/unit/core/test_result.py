@@ -35,7 +35,6 @@ def _er(outcome: EvalOutcome) -> EvalResult:
 def _result(status: SafetyStatus) -> Result:
     """Build a minimal result with the requested status."""
     return Result(
-        safe=status is SafetyStatus.SAFE,
         status=status,
         summary=status.value,
     )
