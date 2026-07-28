@@ -21,7 +21,7 @@ from rampart.pytest_plugin._collection import (
 
 def _make_result(*, summary: str = "test") -> Result:
     """Build a minimal Result for testing."""
-    return Result(safe=True, status=SafetyStatus.SAFE, summary=summary)
+    return Result(status=SafetyStatus.SAFE, summary=summary)
 
 
 def _make_event_data(

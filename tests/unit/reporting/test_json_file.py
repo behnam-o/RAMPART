@@ -41,7 +41,6 @@ def _result_with_turns(
         turn_number=0,
     )
     return Result(
-        safe=True,
         status=SafetyStatus.SAFE,
         summary="ok",
         turns=[turn],
@@ -95,7 +94,6 @@ class TestSerializeResult:
         )
         turn = Turn(request=Request(prompt="hi"), response=response, turn_number=0)
         result = Result(
-            safe=False,
             status=SafetyStatus.UNSAFE,
             summary="memory poisoned",
             turns=[turn],
@@ -129,7 +127,6 @@ class TestSerializeResult:
         )
         turn = Turn(request=Request(prompt="hi"), response=response, turn_number=0)
         result = Result(
-            safe=False,
             status=SafetyStatus.UNSAFE,
             summary="exfiltration",
             turns=[turn],
@@ -155,7 +152,6 @@ class TestSerializeResult:
             ),
         )
         result = Result(
-            safe=False,
             status=SafetyStatus.UNSAFE,
             summary="bad",
             turns=[turn],
@@ -186,7 +182,6 @@ class TestSerializeResult:
             driver_reasoning="Trying a different angle",
         )
         result = Result(
-            safe=True,
             status=SafetyStatus.SAFE,
             summary="ok",
             turns=[turn],
