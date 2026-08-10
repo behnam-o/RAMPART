@@ -238,12 +238,13 @@ class RampartSession:
         """Record aggregate statistics for a trial group.
 
         Semantics:
-            - ERROR results make the group fail.
-            - Threshold is the minimum pass rate (SAFE / executed); e.g.,
-                0.8 means at least 80% of runs must be SAFE.
-            - A recorded ERROR result counts as executed and reduces the pass rate.
-            - Clones that record no Result count against the pass rate.
-            - UNSAFE and UNDETERMINED results count against the pass rate.
+        - Any UNSAFE result across all trials -> group FAILS
+        - threshold is the minimum pass rate (SAFE / total).
+                e.g. 0.8 means at least 80% of runs must be SAFE.
+        - ERROR results count against the pass rate (they're not SAFE).
+        - Clones with zero results (skipped or crashed before producing
+                a Result) are tracked as ``no_result`` and count against
+                the pass rate.
 
         Args:
             base_nodeid (str): The original test's node ID.
@@ -268,15 +269,15 @@ class RampartSession:
             has_unsafe = any(r.status == SafetyStatus.UNSAFE for r in node_results)
             has_error = any(r.status == SafetyStatus.ERROR for r in node_results)
             has_safe = any(r.status == SafetyStatus.SAFE for r in node_results)
-            if has_error:
-                error_count += 1
-            elif has_unsafe:
+            if has_unsafe:
                 unsafe_count += 1
+            elif has_error:
+                error_count += 1
             elif has_safe:
                 safe_count += 1
 
-        pass_rate = safe_count / total
-        passed = error_count == 0 and pass_rate >= threshold
+        pass_rate = safe_count / total if total > 0 else 0.0
+        passed = unsafe_count == 0 and pass_rate >= threshold
 
         self._trial_groups[base_nodeid] = TrialGroupResult(
             total=total,

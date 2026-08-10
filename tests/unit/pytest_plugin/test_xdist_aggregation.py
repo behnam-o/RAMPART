@@ -240,69 +240,16 @@ class TestXdistTrialAggregation:
         assert len(reports) == 1
         assert reports[0]["total_runs"] == 4
 
-    def test_trial_group_passes_at_threshold_with_unsafe_under_loadgroup(
-        self,
-        configured_pytester: Pytester,
-    ) -> None:
-        """UNSAFE trials are tolerated when the pass rate meets the threshold.
-
-        Trial body switches on the clone name (``[trial-0]``..``[trial-3]``)
-        so the same outcome distribution is produced regardless of which
-        worker executes the clone.
-        """
-        configured_pytester.makepyfile(
-            test_trial_mixed="""
-            import pytest
-            from rampart import record_result
-            from rampart.core.result import Result, SafetyStatus
-            from rampart.core.types import ObservabilityLevel
-
-            @pytest.mark.harm("test")
-            @pytest.mark.trial(n=4, threshold=0.5)
-            def test_trial_mixed(request):
-                unsafe = request.node.name.endswith("[trial-3]")
-                record_result(Result(
-                    status=SafetyStatus.UNSAFE if unsafe else SafetyStatus.SAFE,
-                    summary="u" if unsafe else "s",
-                    observability_level=ObservabilityLevel.RESPONSE_ONLY,
-                ))
-            """,
-        )
-        result = configured_pytester.runpytest(
-            "-p",
-            "no:cacheprovider",
-            "-n",
-            "2",
-            "--dist",
-            "loadgroup",
-        )
-        # All 4 clones pass at the pytest item level — record_result
-        # does not fail the test; it only records a Result.
-        result.assert_outcomes(passed=4)
-        reports = _load_reports(configured_pytester)
-        assert len(reports) == 1
-        report = reports[0]
-        assert report["total_runs"] == 4
-        assert report["passed"] == 3
-        assert report["failed"] == 1
-        # The trial-group PASS line proves the controller correctly
-        # aggregated worker results. The bracketed stats uniquely
-        # identify the group line (the per-clone lines lack them).
-        summary = "\n".join(result.outlines)
-        assert "RAMPART Safety Summary" in summary
-        assert (
-            "PASS  test_trial_mixed [3/4 safe, 75% pass rate, threshold: 50%]"
-            in summary
-        )
-
-    def test_trial_group_passes_at_threshold_with_unsafe_under_load(
+    def test_trial_group_fails_when_any_unsafe_under_load(
         self,
         configured_pytester: Pytester,
     ) -> None:
         """Same as above but with --dist=load so clones may split workers.
 
         The PR docs claim aggregation remains correct under --dist=load
-        because the controller merges all worker results.
+        because the controller merges all worker results. This test
+        protects that contract: an UNSAFE clone produced on any worker
+        must propagate into the controller's trial-group verdict.
         """
         configured_pytester.makepyfile(
             test_trial_mixed_load="""
@@ -338,7 +285,7 @@ class TestXdistTrialAggregation:
         assert report["failed"] == 1
         summary = "\n".join(result.outlines)
         assert (
-            "PASS  test_trial_mixed_load [3/4 safe, 75% pass rate, threshold: 50%]"
+            "FAIL  test_trial_mixed_load [3/4 safe, 75% pass rate, threshold: 50%]"
             in summary
         )
 

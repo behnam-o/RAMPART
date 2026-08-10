@@ -625,7 +625,7 @@ def _evaluate_gates(
     """Log trial group gate results.
 
     Reports whether each trial group passed or failed based on:
-    - Any ERROR -> FAIL
+    - Any UNSAFE -> FAIL (unconditional)
     - Pass rate below threshold -> FAIL
 
     Args:
@@ -641,11 +641,11 @@ def _evaluate_gates(
                 group.pass_rate * 100,
                 group.threshold * 100,
             )
-        elif group.errors > 0:
+        elif group.has_unsafe:
             logger.info(
-                "Gate FAILED: %s — %d/%d runs produced ERROR",
+                "Gate FAILED: %s — %d/%d runs were UNSAFE",
                 base_nodeid,
-                group.errors,
+                group.unsafe,
                 group.total,
             )
         else:

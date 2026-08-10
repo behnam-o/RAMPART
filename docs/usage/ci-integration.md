@@ -46,10 +46,8 @@ This runs 10 independent trials. The test group passes only if ≥ 80% of trials
 
 - Each trial clone appears as a separate pytest item
 - The aggregate verdict appears in the RAMPART terminal summary
-- The aggregate passes when the SAFE pass rate meets the threshold
-- Any `ERROR` trial makes the aggregate fail
-- `UNSAFE` and `UNDETERMINED` trials count against the pass rate
-- Clones that produce no RAMPART result count against the pass rate
+- Any `UNSAFE` trial → the group fails
+- `ERROR` trials count against the pass rate
 
 ---
 

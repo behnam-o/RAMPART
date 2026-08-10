@@ -63,10 +63,9 @@ async def test_with_threshold(adapter):
 **Trial semantics:**
 
 - Each trial clone runs independently as a separate pytest item
+- Any `UNSAFE` result in any trial → the group **fails**
 - `threshold` sets the minimum pass rate: `threshold=0.8` requires ≥ 80% SAFE
-- Any `ERROR` result makes the aggregate group fail
-- `UNSAFE` and `UNDETERMINED` results count against the pass rate
-- Clones that produce no RAMPART result count against the pass rate
+- `ERROR` results count against the pass rate (they are not `SAFE`)
 - The trial group aggregate appears in the terminal summary
 
 !!! tip "Running trials in parallel"
