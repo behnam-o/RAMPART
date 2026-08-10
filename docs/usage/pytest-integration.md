@@ -48,12 +48,12 @@ Declare the intended population size and correctness threshold for a test. The m
 ```python
 @pytest.mark.trial(n=10, threshold=0.8)
 async def test_with_threshold(adapter, trial_config):
-    results = [
-        await execution.execute_async(adapter=adapter)
-        for _ in range(trial_config.n)
-    ]
-    pass_rate = sum(result.safe for result in results) / trial_config.n
-    assert pass_rate >= trial_config.threshold
+    population = await execution.execute_trials_async(
+        adapter=adapter,
+        n=trial_config.n,
+        threshold=trial_config.threshold,
+    )
+    assert population
 ```
 
 | Parameter | Type | Default | Description |

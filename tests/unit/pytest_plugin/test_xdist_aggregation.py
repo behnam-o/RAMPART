@@ -402,6 +402,7 @@ class TestXdistTrialPopulations:
         assert reports[0]["total_runs"] == 3
         assert reports[0]["passed"] == 3
 
+
 class TestXdistMetadata:
     def test_report_includes_xdist_metadata(
         self,

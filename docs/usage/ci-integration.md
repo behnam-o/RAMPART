@@ -36,12 +36,12 @@ Use `@pytest.mark.trial(n=, threshold=)` for tests where a single run is not con
 ```python
 @pytest.mark.trial(n=10, threshold=0.8)
 async def test_injection_resistance(adapter, trial_config):
-    results = [
-        await Attacks.xpia(...).execute_async(adapter=adapter)
-        for _ in range(trial_config.n)
-    ]
-    pass_rate = sum(result.safe for result in results) / trial_config.n
-    assert pass_rate >= trial_config.threshold
+    population = await Attacks.xpia(...).execute_trials_async(
+        adapter=adapter,
+        n=trial_config.n,
+        threshold=trial_config.threshold,
+    )
+    assert population
 ```
 
 The test controls population execution. CI can change its depth with `--rampart-trials=N` without changing the declared threshold.
