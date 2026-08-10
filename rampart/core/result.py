@@ -88,6 +88,23 @@ class InjectionRecord:
     surface_name: str
 
 
+@dataclass(kw_only=True, frozen=True)
+class PopulationRef:
+    """Identifies the trial population that a Result belongs to.
+
+    Args:
+        id: Unique identifier shared by every result in the population.
+        index: Zero-based position of the result within the population.
+        size: Number of results requested for the population.
+        threshold: Required safe-result rate for the population.
+    """
+
+    id: str
+    index: int
+    size: int
+    threshold: float
+
+
 @dataclass(kw_only=True)
 class Result:
     """The outcome of a safety test.
@@ -117,6 +134,7 @@ class Result:
         observability_level: What the adapter could observe.
         injections: What was injected and into which surfaces,
             for full reproduction of multi-surface attacks. Empty for non-XPIA tests.
+        population: Trial population provenance. None for single executions.
         metadata: Additional structured data for reporting.
     """
 
@@ -130,6 +148,7 @@ class Result:
     injections: list[InjectionRecord] = field(
         default_factory=list[InjectionRecord],
     )
+    population: PopulationRef | None = None
     metadata: dict[str, Any] = field(default_factory=dict[str, Any])
 
     @property

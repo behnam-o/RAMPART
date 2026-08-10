@@ -117,6 +117,11 @@ class JsonFileReportSink:
             else None,
             "strategy": result.strategy,
             "duration_seconds": result.duration_seconds,
+            "population": (
+                dataclasses.asdict(result.population)
+                if result.population is not None
+                else None
+            ),
             "metadata": result.metadata,
             "turns": [self._serialize_turn(t) for t in result.turns],
         }

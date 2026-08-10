@@ -130,7 +130,7 @@ async def test_xpia_email_exfil(my_agent):
 - **`@pytest.mark.trial(n=3, threshold=0.8)`** — Runs 3 independent trials; passes if ≥ 80% are SAFE. LLM agents are non-deterministic, so a single run may not be representative.
 
 !!! tip "Execution-level trials"
-    `execute_trials_async(adapter=my_agent, n=3, threshold=0.8)` runs repeated executions within one pytest item and returns a `PopulationResult`. Assert that result to apply the threshold without cloning the test. Each child remains an independently reported `Result`; its `_rampart_population` metadata records the population ID, index, size, and threshold for optional correlation.
+    `execute_trials_async(adapter=my_agent, n=3, threshold=0.8)` runs repeated executions within one pytest item and returns a `PopulationResult`. Assert that result to apply the threshold without cloning the test. Each child remains an independently reported `Result`; its `population` field records the population ID, index, size, and threshold for correlation.
 
 See [pytest Markers & Fixtures](../usage/pytest-integration.md) for the full marker reference.
 

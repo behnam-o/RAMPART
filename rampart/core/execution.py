@@ -18,13 +18,10 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from rampart.core.result import PopulationResult, Result, SafetyStatus
+from rampart.core.result import PopulationRef, PopulationResult, Result, SafetyStatus
 from rampart.core.types import EvalContext, Request, Response, Turn
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
-    from typing import Any
-
     from rampart.core.adapter import AgentAdapter
     from rampart.core.evaluator import Evaluator
     from rampart.core.manifest import AppManifest
@@ -222,7 +219,6 @@ class BaseExecution(ABC):
         self,
         *,
         adapter: AgentAdapter,
-        additional_result_metadata: Mapping[str, Any] | None = None,
     ) -> Result:
         """Execute the safety test.
 
@@ -235,17 +231,98 @@ class BaseExecution(ABC):
 
         Args:
             adapter (AgentAdapter): The agent to test.
-            additional_result_metadata (Mapping[str, Any] | None): Metadata to
-                add to the result before ON_POST_EXECUTE. Existing result
-                metadata cannot be overwritten. Keys beginning with
-                ``_rampart_`` are conventionally used by the framework.
 
         Returns:
             Result: Safety verdict with evidence and diagnostics.
+        """
+        return await self._execute_once_async(
+            adapter=adapter,
+            population=None,
+        )
+
+    async def execute_trials_async(
+        self,
+        *,
+        adapter: AgentAdapter,
+        n: int,
+        threshold: float,
+    ) -> PopulationResult:
+        """Execute a population of independent trials.
+
+        Each trial uses the normal ``execute_async`` lifecycle, including
+        event dispatch and result collection. The returned aggregate provides
+        the single logical verdict that callers should assert. Execution
+        strategies are responsible for creating a fresh agent session during
+        each call to ``execute_async``.
+
+        Note: Trials are only statistically meaningful when the adapter is stateless
+        across sessions. A stateful adapter (e.g. memory-backed) makes pass_rate an
+        unreliable estimate.
+
+        Args:
+            adapter (AgentAdapter): The agent to test.
+            n (int): Number of independent trials to execute.
+            threshold (float): Required safe-result rate from 0.0 to 1.0.
+
+        Returns:
+            PopulationResult: Aggregate verdict and individual trial results.
 
         Raises:
-            ValueError: If additional_result_metadata contains a key already
-                present in the result metadata.
+            TypeError: If n is not a non-boolean integer.
+            ValueError: If n is less than 1 or threshold is outside
+                [0.0, 1.0].
+        """
+        if not isinstance(n, int) or isinstance(n, bool):
+            msg = "n must be a non-boolean integer"
+            raise TypeError(msg)
+        if n < 1:
+            msg = "n must be greater than or equal to 1"
+            raise ValueError(msg)
+        if not 0.0 <= threshold <= 1.0:
+            msg = "threshold must be between 0.0 and 1.0"
+            raise ValueError(msg)
+
+        population_id = uuid.uuid4().hex
+        results: list[Result] = []
+        for index in range(n):
+            result = await self._execute_once_async(
+                adapter=adapter,
+                population=PopulationRef(
+                    id=population_id,
+                    index=index,
+                    size=n,
+                    threshold=threshold,
+                ),
+            )
+            results.append(result)
+
+        return PopulationResult(
+            results=results,
+            threshold=threshold,
+        )
+
+    @abstractmethod
+    async def _execute_async(self, *, adapter: AgentAdapter) -> Result:
+        """Core execution logic implemented by each strategy.
+
+        Args:
+            adapter (AgentAdapter): The agent to test.
+
+        Returns:
+            Result: Safety verdict.
+        """
+        ...
+
+    async def _execute_once_async(
+        self,
+        *,
+        adapter: AgentAdapter,
+        population: PopulationRef | None,
+    ) -> Result:
+        """Run one execution lifecycle with optional population provenance.
+
+        Returns:
+            Result: The execution result after lifecycle processing.
         """
         start = time.monotonic()
         await self._fire(
@@ -281,10 +358,7 @@ class BaseExecution(ABC):
 
         elapsed = time.monotonic() - start
         result.duration_seconds = elapsed
-        self._add_result_metadata(
-            result=result,
-            additional_result_metadata=additional_result_metadata,
-        )
+        result.population = population
         await self._fire(
             ExecutionEvent.ON_POST_EXECUTE,
             adapter=adapter,
@@ -292,103 +366,6 @@ class BaseExecution(ABC):
             result=result,
         )
         return result
-
-    async def execute_trials_async(
-        self,
-        *,
-        adapter: AgentAdapter,
-        n: int,
-        threshold: float,
-    ) -> PopulationResult:
-        """Execute a population of independent trials.
-
-        Each trial uses the normal ``execute_async`` lifecycle, including
-        event dispatch and result collection. The returned aggregate provides
-        the single logical verdict that callers should assert. Execution
-        strategies are responsible for creating a fresh agent session during
-        each call to ``execute_async``.
-
-        Note: Trials are only statistically meaningful when the adapter is stateless
-        across sessions. a stateful adapter (e.g. memory-backed) makes pass_rate an
-        unreliable estimate.
-
-        Args:
-            adapter (AgentAdapter): The agent to test.
-            n (int): Number of independent trials to execute.
-            threshold (float): Required safe-result rate from 0.0 to 1.0.
-
-        Returns:
-            PopulationResult: Aggregate verdict and individual trial results.
-
-        Raises:
-            TypeError: If n is not a non-boolean integer.
-            ValueError: If n is less than 1 or threshold is outside
-                [0.0, 1.0].
-        """
-        if not isinstance(n, int) or isinstance(n, bool):
-            msg = "n must be a non-boolean integer"
-            raise TypeError(msg)
-        if n < 1:
-            msg = "n must be greater than or equal to 1"
-            raise ValueError(msg)
-        if not 0.0 <= threshold <= 1.0:
-            msg = "threshold must be between 0.0 and 1.0"
-            raise ValueError(msg)
-
-        population_id = uuid.uuid4().hex
-        results: list[Result] = []
-        for index in range(n):
-            result = await self.execute_async(
-                adapter=adapter,
-                additional_result_metadata={
-                    "_rampart_population": {
-                        "id": population_id,
-                        "index": index,
-                        "size": n,
-                        "threshold": threshold,
-                    },
-                },
-            )
-            results.append(result)
-
-        return PopulationResult(
-            results=results,
-            threshold=threshold,
-        )
-
-    @abstractmethod
-    async def _execute_async(self, *, adapter: AgentAdapter) -> Result:
-        """Core execution logic implemented by each strategy.
-
-        Args:
-            adapter (AgentAdapter): The agent to test.
-
-        Returns:
-            Result: Safety verdict.
-        """
-        ...
-
-    @staticmethod
-    def _add_result_metadata(
-        *,
-        result: Result,
-        additional_result_metadata: Mapping[str, Any] | None,
-    ) -> None:
-        """Add metadata without overwriting keys produced by the execution.
-
-        Raises:
-            ValueError: If an additional metadata key already exists.
-        """
-        if not additional_result_metadata:
-            return
-
-        duplicate_keys = result.metadata.keys() & additional_result_metadata.keys()
-        if duplicate_keys:
-            formatted_keys = ", ".join(sorted(duplicate_keys))
-            msg = f"Result metadata already contains key(s): {formatted_keys}"
-            raise ValueError(msg)
-
-        result.metadata = {**result.metadata, **additional_result_metadata}
 
     async def _fire(
         self,

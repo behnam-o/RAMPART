@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from rampart.core.result import HarmCategory, Result, SafetyStatus
+from rampart.core.result import HarmCategory, PopulationRef, Result, SafetyStatus
 from rampart.core.types import (
     EvalOutcome,
     EvalResult,
@@ -61,6 +61,32 @@ class TestSerializeResult:
         data = sink._serialize_result(result)
 
         assert data["metadata"] == {"conversation_id": "abc-123"}
+
+    def test_population_ref_appears_in_output(self) -> None:
+        sink = JsonFileReportSink(output_dir=Path("/tmp"))
+        result = _result_with_turns()
+        result.population = PopulationRef(
+            id="population-1",
+            index=2,
+            size=5,
+            threshold=0.8,
+        )
+
+        data = sink._serialize_result(result)
+
+        assert data["population"] == {
+            "id": "population-1",
+            "index": 2,
+            "size": 5,
+            "threshold": 0.8,
+        }
+
+    def test_population_is_null_for_single_execution(self) -> None:
+        sink = JsonFileReportSink(output_dir=Path("/tmp"))
+
+        data = sink._serialize_result(_result_with_turns())
+
+        assert data["population"] is None
 
     def test_turn_response_metadata_appears_in_turns(self) -> None:
         sink = JsonFileReportSink(output_dir=Path("/tmp"))

@@ -29,6 +29,7 @@ from rampart.common.text import strip_ansi as _strip_ansi_impl
 from rampart.core.result import (
     HarmCategory,
     InjectionRecord,
+    PopulationRef,
     Result,
     SafetyStatus,
 )
@@ -490,6 +491,16 @@ def _serialize_result(*, result: Result, nodeid: str) -> dict[str, Any]:
         "injections": [
             _serialize_injection_record(injection=i) for i in result.injections
         ],
+        "population": (
+            {
+                "id": result.population.id,
+                "index": result.population.index,
+                "size": result.population.size,
+                "threshold": result.population.threshold,
+            }
+            if result.population is not None
+            else None
+        ),
         "metadata": _sanitize_metadata(
             metadata=result.metadata,
             nodeid=nodeid,
@@ -909,6 +920,7 @@ def _deserialize_result(*, data: object) -> Result:
     typed = cast("dict[str, Any]", data)
     raw_turns = typed.get("turns", [])
     raw_injections = typed.get("injections", [])
+    raw_population = typed.get("population")
     raw_metadata = typed.get("metadata", {})
     metadata = _sanitize(
         value=raw_metadata if isinstance(raw_metadata, dict) else {},
@@ -940,6 +952,16 @@ def _deserialize_result(*, data: object) -> Result:
                 raw_injections if isinstance(raw_injections, list) else [],
             )
         ],
+        population=(
+            PopulationRef(
+                id=str(raw_population.get("id", "")),
+                index=int(raw_population.get("index", 0)),
+                size=int(raw_population.get("size", 0)),
+                threshold=float(raw_population.get("threshold", 0.0)),
+            )
+            if isinstance(raw_population, dict)
+            else None
+        ),
         metadata=cast("dict[str, Any]", metadata),
     )
 

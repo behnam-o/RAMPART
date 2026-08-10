@@ -15,7 +15,7 @@ from rampart.core.execution import (
     ExecutionEventHandler,
 )
 from rampart.core.manifest import AppManifest
-from rampart.core.result import PopulationResult, Result, SafetyStatus
+from rampart.core.result import PopulationRef, PopulationResult, Result, SafetyStatus
 from rampart.core.types import (
     EvalContext,
     EvalResult,
@@ -74,23 +74,6 @@ class _SuccessExecution(BaseExecution):
     async def _execute_async(self, *, adapter: AgentAdapter) -> Result:
         """Return a safe result."""
         return Result(status=SafetyStatus.SAFE, summary="ok")
-
-
-class _MetadataExecution(BaseExecution):
-    """Execution that returns existing result metadata."""
-
-    @property
-    def strategy_name(self) -> str:
-        """Test strategy name."""
-        return "metadata"
-
-    async def _execute_async(self, *, adapter: AgentAdapter) -> Result:
-        """Return a safe result with metadata."""
-        return Result(
-            status=SafetyStatus.SAFE,
-            summary="ok",
-            metadata={"existing": "value"},
-        )
 
 
 class _InfraErrorExecution(BaseExecution):
@@ -174,44 +157,6 @@ class TestBaseExecutionLifecycle:
         post = handler.events[1]
         assert post.elapsed_seconds >= 0.0
 
-    async def test_additional_metadata_is_present_on_post_execute_async(self) -> None:
-        handler = _RecordingHandler()
-        execution = _SuccessExecution(event_handlers=[handler])
-
-        result = await execution.execute_async(
-            adapter=_StubAdapter(),
-            additional_result_metadata={"correlation_id": "run-1"},
-        )
-
-        assert result.metadata == {"correlation_id": "run-1"}
-        assert handler.events[1].result is result
-        assert handler.events[1].result.metadata == {"correlation_id": "run-1"}
-
-    async def test_rejects_duplicate_additional_metadata_async(self) -> None:
-        handler = _RecordingHandler()
-        execution = _MetadataExecution(event_handlers=[handler])
-
-        with pytest.raises(ValueError, match=r"already contains key.*existing"):
-            await execution.execute_async(
-                adapter=_StubAdapter(),
-                additional_result_metadata={"existing": "replacement"},
-            )
-
-        assert [event.event for event in handler.events] == [
-            ExecutionEvent.ON_PRE_EXECUTE,
-        ]
-
-    async def test_additional_metadata_is_attached_to_error_result_async(self) -> None:
-        execution = _InfraErrorExecution()
-
-        result = await execution.execute_async(
-            adapter=_StubAdapter(),
-            additional_result_metadata={"correlation_id": "run-1"},
-        )
-
-        assert result.status is SafetyStatus.ERROR
-        assert result.metadata["correlation_id"] == "run-1"
-
 
 class TestExecuteTrials:
     async def test_returns_population_result_async(self) -> None:
@@ -243,7 +188,7 @@ class TestExecuteTrials:
             ExecutionEvent.ON_POST_EXECUTE,
         ] * 3
 
-    async def test_attaches_population_metadata_before_post_execute_async(self) -> None:
+    async def test_attaches_population_ref_before_post_execute_async(self) -> None:
         handler = _RecordingHandler()
         execution = _SuccessExecution(event_handlers=[handler])
 
@@ -253,19 +198,20 @@ class TestExecuteTrials:
             threshold=0.8,
         )
 
-        metadata = [
-            result.metadata["_rampart_population"] for result in population.results
-        ]
-        assert len({item["id"] for item in metadata}) == 1
-        assert [item["index"] for item in metadata] == [0, 1, 2]
-        assert all(item["size"] == 3 for item in metadata)
-        assert [item["threshold"] for item in metadata] == pytest.approx([0.8] * 3)
-        post_metadata = []
+        refs = [result.population for result in population.results]
+        assert all(ref is not None for ref in refs)
+        assert len({ref.id for ref in refs if ref is not None}) == 1
+        assert [ref.index for ref in refs if ref is not None] == [0, 1, 2]
+        assert all(ref.size == 3 for ref in refs if ref is not None)
+        assert [ref.threshold for ref in refs if ref is not None] == pytest.approx(
+            [0.8] * 3,
+        )
+        post_refs = []
         for event in handler.events:
             if event.event is ExecutionEvent.ON_POST_EXECUTE:
                 assert event.result is not None
-                post_metadata.append(event.result.metadata["_rampart_population"])
-        assert post_metadata == metadata
+                post_refs.append(event.result.population)
+        assert post_refs == refs
 
     async def test_separate_populations_have_distinct_ids_async(self) -> None:
         execution = _SuccessExecution()
@@ -281,9 +227,29 @@ class TestExecuteTrials:
             threshold=1.0,
         )
 
-        first_id = first.results[0].metadata["_rampart_population"]["id"]
-        second_id = second.results[0].metadata["_rampart_population"]["id"]
+        assert first.results[0].population is not None
+        assert second.results[0].population is not None
+        first_id = first.results[0].population.id
+        second_id = second.results[0].population.id
         assert first_id != second_id
+
+    async def test_error_result_has_population_ref_on_post_execute_async(self) -> None:
+        handler = _RecordingHandler()
+        execution = _InfraErrorExecution(event_handlers=[handler])
+
+        population = await execution.execute_trials_async(
+            adapter=_StubAdapter(),
+            n=1,
+            threshold=1.0,
+        )
+
+        result = population.results[0]
+        assert result.status is SafetyStatus.ERROR
+        assert result.population is not None
+        post = handler.events[-1]
+        assert post.event is ExecutionEvent.ON_POST_EXECUTE
+        assert post.result is result
+        assert post.result.population is result.population
 
     async def test_rejects_non_positive_trial_count_async(self) -> None:
         execution = _SuccessExecution()
@@ -330,6 +296,16 @@ class TestPopulationPublicExports:
         from rampart.core import PopulationResult as CorePopulationResult
 
         assert CorePopulationResult is PopulationResult
+
+    def test_population_ref_exported_from_rampart(self) -> None:
+        from rampart import PopulationRef as TopLevelPopulationRef
+
+        assert TopLevelPopulationRef is PopulationRef
+
+    def test_population_ref_exported_from_rampart_core(self) -> None:
+        from rampart.core import PopulationRef as CorePopulationRef
+
+        assert CorePopulationRef is PopulationRef
 
 
 class TestInfrastructureErrorHandling:
