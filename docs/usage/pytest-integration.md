@@ -66,7 +66,7 @@ async def test_with_threshold(adapter):
 - `threshold` sets the minimum pass rate: `threshold=0.8` requires ≥ 80% SAFE
 - Any `ERROR` result makes the aggregate group fail
 - `UNSAFE` and `UNDETERMINED` results count against the pass rate
-- Clones that produce no RAMPART result are excluded from the pass-rate denominator
+- Clones that produce no RAMPART result count against the pass rate
 - The trial group aggregate appears in the terminal summary
 
 !!! tip "Running trials in parallel"

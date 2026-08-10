@@ -231,6 +231,28 @@ class TestRampartSession:
         assert group.pass_rate == pytest.approx(0.0)
         assert not group.passed
 
+    def test_record_trial_group_error_counts_in_denominator(self) -> None:
+        session = RampartSession()
+        statuses = [SafetyStatus.SAFE, SafetyStatus.ERROR]
+        clone_nodeids: list[str] = []
+        for idx, status in enumerate(statuses):
+            item = MagicMock()
+            item.nodeid = f"test_file.py::test_error_rate[trial-{idx}]"
+            collector = ResultCollector()
+            collector.record(result=Result(status=status, summary=status.value))
+            session.absorb(node=item, collector=collector)
+            clone_nodeids.append(item.nodeid)
+
+        session.record_trial_group(
+            base_nodeid="test_error_rate",
+            clone_nodeids=clone_nodeids,
+            threshold=0.5,
+        )
+
+        group = session.trial_groups["test_error_rate"]
+        assert group.pass_rate == pytest.approx(0.5)
+        assert not group.passed
+
     def test_record_trial_group_error_takes_precedence_over_unsafe(self) -> None:
         session = RampartSession()
         mixed_item = MagicMock()
@@ -264,10 +286,10 @@ class TestRampartSession:
         assert group.pass_rate == pytest.approx(0.5)
         assert not group.passed
 
-    def test_record_trial_group_excludes_no_result_from_denominator(self) -> None:
+    def test_record_trial_group_no_result_counts_against_pass_rate(self) -> None:
         session = RampartSession()
         item = MagicMock()
-        item.nodeid = "test_file.py::test_skip[trial-0]"
+        item.nodeid = "test_file.py::test_missing[trial-0]"
         collector = ResultCollector()
         collector.record(
             result=Result(status=SafetyStatus.SAFE, summary="safe"),
@@ -275,15 +297,15 @@ class TestRampartSession:
         session.absorb(node=item, collector=collector)
 
         session.record_trial_group(
-            base_nodeid="test_skip",
-            clone_nodeids=[item.nodeid, "test_file.py::test_skip[trial-1]"],
+            base_nodeid="test_missing",
+            clone_nodeids=[item.nodeid, "test_file.py::test_missing[trial-1]"],
             threshold=1.0,
         )
 
-        group = session.trial_groups["test_skip"]
+        group = session.trial_groups["test_missing"]
         assert group.no_result == 1
-        assert group.pass_rate == pytest.approx(1.0)
-        assert group.passed
+        assert group.pass_rate == pytest.approx(0.5)
+        assert not group.passed
 
     def test_record_trial_group_fails_below_threshold(self) -> None:
         session = RampartSession()
@@ -870,7 +892,7 @@ class TestTrialGroupRendering:
 class TestEvaluateGates:
     """Gate evaluation logs when threshold is exceeded."""
 
-    def test_pass_log_uses_executed_count_denominator(
+    def test_pass_log_includes_no_result_in_denominator(
         self,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
@@ -885,13 +907,13 @@ class TestEvaluateGates:
         session.record_trial_group(
             base_nodeid="test.py::test_gate",
             clone_nodeids=[item.nodeid, "test.py::test_gate[trial-1]"],
-            threshold=1.0,
+            threshold=0.5,
         )
 
         with caplog.at_level("INFO"):
             _evaluate_gates(rampart_session=session)
 
-        assert "1/1 safe (100% pass rate" in caplog.text
+        assert "1/2 safe (50% pass rate" in caplog.text
 
     def test_logs_when_rate_exceeds_threshold(self) -> None:
         session = RampartSession()

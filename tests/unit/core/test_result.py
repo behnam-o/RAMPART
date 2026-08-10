@@ -179,6 +179,7 @@ class TestPopulationResult:
             threshold=0.5,
         )
 
+        assert population.pass_rate == pytest.approx(0.5)
         assert population.status is SafetyStatus.ERROR
 
     def test_all_error_returns_error(self) -> None:
