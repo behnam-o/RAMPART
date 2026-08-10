@@ -1,6 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
+import asyncio
 import types
 from typing import Self
 
@@ -73,6 +74,32 @@ class _SuccessExecution(BaseExecution):
 
     async def _execute_async(self, *, adapter: AgentAdapter) -> Result:
         """Return a safe result."""
+        return Result(status=SafetyStatus.SAFE, summary="ok")
+
+
+class _ConcurrencyTrackingExecution(BaseExecution):
+    """Execution that records the number of overlapping trials."""
+
+    def __init__(self, *, expected_concurrency: int) -> None:
+        super().__init__()
+        self.active_count = 0
+        self.max_active_count = 0
+        self._expected_concurrency = expected_concurrency
+        self._release = asyncio.Event()
+
+    @property
+    def strategy_name(self) -> str:
+        """Test strategy name."""
+        return "concurrency_tracking"
+
+    async def _execute_async(self, *, adapter: AgentAdapter) -> Result:
+        """Wait until the expected number of trials overlap."""
+        self.active_count += 1
+        self.max_active_count = max(self.max_active_count, self.active_count)
+        if self.active_count == self._expected_concurrency:
+            self._release.set()
+        await self._release.wait()
+        self.active_count -= 1
         return Result(status=SafetyStatus.SAFE, summary="ok")
 
 
@@ -188,6 +215,21 @@ class TestExecuteTrials:
             ExecutionEvent.ON_POST_EXECUTE,
         ] * 3
 
+    async def test_runs_trials_with_opt_in_bounded_concurrency_async(self) -> None:
+        execution = _ConcurrencyTrackingExecution(expected_concurrency=2)
+
+        population = await execution.execute_trials_async(
+            adapter=_StubAdapter(),
+            n=4,
+            threshold=1.0,
+            max_concurrency=2,
+        )
+
+        assert execution.max_active_count == 2
+        refs = [result.population for result in population.results]
+        assert all(ref is not None for ref in refs)
+        assert [ref.index for ref in refs if ref is not None] == [0, 1, 2, 3]
+
     async def test_attaches_population_ref_before_post_execute_async(self) -> None:
         handler = _RecordingHandler()
         execution = _SuccessExecution(event_handlers=[handler])
@@ -284,6 +326,35 @@ class TestExecuteTrials:
             )
 
         assert handler.events == []
+
+    @pytest.mark.parametrize("max_concurrency", [True, 1.5, "2"])
+    async def test_rejects_invalid_max_concurrency_type_async(
+        self,
+        max_concurrency: object,
+    ) -> None:
+        execution = _SuccessExecution()
+
+        with pytest.raises(
+            TypeError,
+            match="max_concurrency must be a non-boolean integer",
+        ):
+            await execution.execute_trials_async(
+                adapter=_StubAdapter(),
+                n=3,
+                threshold=0.8,
+                max_concurrency=max_concurrency,  # ty: ignore[invalid-argument-type]
+            )
+
+    async def test_rejects_non_positive_max_concurrency_async(self) -> None:
+        execution = _SuccessExecution()
+
+        with pytest.raises(ValueError, match="max_concurrency must be greater"):
+            await execution.execute_trials_async(
+                adapter=_StubAdapter(),
+                n=3,
+                threshold=0.8,
+                max_concurrency=0,
+            )
 
 
 class TestPopulationPublicExports:

@@ -10,6 +10,7 @@ dispatch, infrastructure error handling).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import uuid
@@ -246,6 +247,7 @@ class BaseExecution(ABC):
         adapter: AgentAdapter,
         n: int,
         threshold: float,
+        max_concurrency: int = 1,
     ) -> PopulationResult:
         """Execute a population of independent trials.
 
@@ -253,7 +255,8 @@ class BaseExecution(ABC):
         event dispatch and result collection. The returned aggregate provides
         the single logical verdict that callers should assert. Execution
         strategies are responsible for creating a fresh agent session during
-        each call to ``execute_async``.
+        each call to ``execute_async``. Trials run sequentially by default;
+        set ``max_concurrency`` greater than 1 to opt into bounded concurrency.
 
         Note: Trials are only statistically meaningful when the adapter is stateless
         across sessions. A stateful adapter (e.g. memory-backed) makes pass_rate an
@@ -263,14 +266,16 @@ class BaseExecution(ABC):
             adapter (AgentAdapter): The agent to test.
             n (int): Number of independent trials to execute.
             threshold (float): Required safe-result rate from 0.0 to 1.0.
+            max_concurrency (int): Maximum number of concurrent trials.
+                Defaults to 1.
 
         Returns:
             PopulationResult: Aggregate verdict and individual trial results.
 
         Raises:
-            TypeError: If n is not a non-boolean integer.
-            ValueError: If n is less than 1 or threshold is outside
-                [0.0, 1.0].
+            TypeError: If n or max_concurrency is not a non-boolean integer.
+            ValueError: If n or max_concurrency is less than 1, or threshold
+                is outside [0.0, 1.0].
         """
         if not isinstance(n, int) or isinstance(n, bool):
             msg = "n must be a non-boolean integer"
@@ -281,20 +286,30 @@ class BaseExecution(ABC):
         if not 0.0 <= threshold <= 1.0:
             msg = "threshold must be between 0.0 and 1.0"
             raise ValueError(msg)
+        if not isinstance(max_concurrency, int) or isinstance(max_concurrency, bool):
+            msg = "max_concurrency must be a non-boolean integer"
+            raise TypeError(msg)
+        if max_concurrency < 1:
+            msg = "max_concurrency must be greater than or equal to 1"
+            raise ValueError(msg)
 
         population_id = uuid.uuid4().hex
-        results: list[Result] = []
-        for index in range(n):
-            result = await self._execute_once_async(
-                adapter=adapter,
-                population=PopulationRef(
-                    id=population_id,
-                    index=index,
-                    size=n,
-                    threshold=threshold,
-                ),
-            )
-            results.append(result)
+        semaphore = asyncio.Semaphore(max_concurrency)
+        results = await asyncio.gather(
+            *(
+                self._execute_trial_async(
+                    adapter=adapter,
+                    population=PopulationRef(
+                        id=population_id,
+                        index=index,
+                        size=n,
+                        threshold=threshold,
+                    ),
+                    semaphore=semaphore,
+                )
+                for index in range(n)
+            ),
+        )
 
         return PopulationResult(
             results=results,
@@ -366,6 +381,24 @@ class BaseExecution(ABC):
             result=result,
         )
         return result
+
+    async def _execute_trial_async(
+        self,
+        *,
+        adapter: AgentAdapter,
+        population: PopulationRef,
+        semaphore: asyncio.Semaphore,
+    ) -> Result:
+        """Execute one population trial within the concurrency bound.
+
+        Returns:
+            Result: The completed trial result.
+        """
+        async with semaphore:
+            return await self._execute_once_async(
+                adapter=adapter,
+                population=population,
+            )
 
     async def _fire(
         self,
