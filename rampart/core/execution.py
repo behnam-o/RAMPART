@@ -295,21 +295,23 @@ class BaseExecution(ABC):
 
         population_id = uuid.uuid4().hex
         semaphore = asyncio.Semaphore(max_concurrency)
-        results = await asyncio.gather(
-            *(
-                self._execute_trial_async(
-                    adapter=adapter,
-                    population=PopulationRef(
-                        id=population_id,
-                        index=index,
-                        size=n,
-                        threshold=threshold,
+        async with asyncio.TaskGroup() as task_group:
+            tasks = [
+                task_group.create_task(
+                    self._execute_trial_async(
+                        adapter=adapter,
+                        population=PopulationRef(
+                            id=population_id,
+                            index=index,
+                            size=n,
+                            threshold=threshold,
+                        ),
+                        semaphore=semaphore,
                     ),
-                    semaphore=semaphore,
                 )
                 for index in range(n)
-            ),
-        )
+            ]
+        results = [task.result() for task in tasks]
 
         return PopulationResult(
             results=results,
