@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from rampart.pytest_plugin._xdist import MIN_RESULT_SIZE_LIMIT_BYTES
+
 if TYPE_CHECKING:
     from _pytest.pytester import Pytester, RunResult
 
@@ -81,6 +83,14 @@ def _load_reports(configured_pytester: Pytester) -> list[dict[str, Any]]:
         return []
     return [
         json.loads(p.read_text()) for p in sorted(out_dir.glob("run_report_*.json"))
+    ]
+
+
+def _report_results(report: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        result
+        for results in report.get("by_harm_category", {}).values()
+        for result in results
     ]
 
 
@@ -171,6 +181,285 @@ class TestXdistConsolidation:
         assert report["population_summary"]["total_runs"] == 4
         assert report["population_summary"]["safe_count"] == 3
         assert report["population_summary"]["unsafe_count"] == 1
+
+
+class TestStreamedResultTransport:
+    def test_async_test_body_streams_result(
+        self,
+        configured_pytester: Pytester,
+    ) -> None:
+        configured_pytester.makepyfile(
+            test_async_stream="""
+            import asyncio
+            import pytest
+            from rampart import record_result
+            from rampart.core.result import Result, SafetyStatus
+
+            @pytest.mark.asyncio
+            @pytest.mark.harm("async")
+            async def test_async_stream_async():
+                await asyncio.gather(asyncio.sleep(0), asyncio.sleep(0))
+                record_result(Result(status=SafetyStatus.SAFE, summary="async"))
+            """,
+        )
+        result = configured_pytester.runpytest(
+            "-p",
+            "no:cacheprovider",
+            "-n",
+            "1",
+        )
+        result.assert_outcomes(passed=1)
+        reports = _load_reports(configured_pytester)
+        assert reports[0]["total_runs"] == 1
+        assert _report_results(reports[0])[0]["summary"] == "async"
+
+    def test_setup_failure_streams_result(
+        self,
+        configured_pytester: Pytester,
+    ) -> None:
+        configured_pytester.makepyfile(
+            test_setup_failure="""
+            import pytest
+            from rampart import record_result
+            from rampart.core.result import Result, SafetyStatus
+
+            @pytest.fixture
+            def failing_setup():
+                record_result(Result(
+                    status=SafetyStatus.ERROR,
+                    summary="setup-failed",
+                ))
+                raise RuntimeError("setup failed")
+
+            @pytest.mark.harm("setup")
+            def test_setup_failure(failing_setup):
+                pass
+            """,
+        )
+        result = configured_pytester.runpytest(
+            "-p",
+            "no:cacheprovider",
+            "-n",
+            "1",
+        )
+        result.assert_outcomes(errors=1)
+        reports = _load_reports(configured_pytester)
+        assert [item["summary"] for item in _report_results(reports[0])] == [
+            "setup-failed",
+        ]
+
+    def test_setup_skip_streams_result(
+        self,
+        configured_pytester: Pytester,
+    ) -> None:
+        configured_pytester.makepyfile(
+            test_setup_skip="""
+            import pytest
+            from rampart import record_result
+            from rampart.core.result import Result, SafetyStatus
+
+            @pytest.fixture
+            def skipped_setup():
+                record_result(Result(
+                    status=SafetyStatus.UNDETERMINED,
+                    summary="setup-skipped",
+                ))
+                pytest.skip("setup skipped")
+
+            @pytest.mark.harm("setup")
+            def test_setup_skip(skipped_setup):
+                pass
+            """,
+        )
+        result = configured_pytester.runpytest(
+            "-p",
+            "no:cacheprovider",
+            "-n",
+            "1",
+        )
+        result.assert_outcomes(skipped=1)
+        reports = _load_reports(configured_pytester)
+        assert [item["summary"] for item in _report_results(reports[0])] == [
+            "setup-skipped",
+        ]
+
+    def test_successful_setup_and_call_stream_once(
+        self,
+        configured_pytester: Pytester,
+    ) -> None:
+        configured_pytester.makepyfile(
+            test_setup_success="""
+            import pytest
+            from rampart import record_result
+            from rampart.core.result import Result, SafetyStatus
+
+            @pytest.fixture
+            def recorded_setup():
+                record_result(Result(
+                    status=SafetyStatus.SAFE,
+                    summary="setup",
+                ))
+
+            @pytest.mark.harm("setup")
+            def test_setup_success(recorded_setup):
+                record_result(Result(
+                    status=SafetyStatus.SAFE,
+                    summary="call",
+                ))
+            """,
+        )
+        result = configured_pytester.runpytest(
+            "-p",
+            "no:cacheprovider",
+            "-n",
+            "1",
+        )
+        result.assert_outcomes(passed=1)
+        reports = _load_reports(configured_pytester)
+        assert [item["summary"] for item in _report_results(reports[0])] == [
+            "setup",
+            "call",
+        ]
+
+    def test_teardown_only_result_is_intentionally_not_streamed(
+        self,
+        configured_pytester: Pytester,
+    ) -> None:
+        configured_pytester.makepyfile(
+            test_teardown_boundary="""
+            import pytest
+            from rampart import record_result
+            from rampart.core.result import Result, SafetyStatus
+
+            @pytest.fixture
+            def record_during_teardown():
+                yield
+                record_result(Result(
+                    status=SafetyStatus.SAFE,
+                    summary="teardown-only",
+                ))
+
+            @pytest.mark.harm("teardown")
+            def test_teardown_boundary(record_during_teardown):
+                pass
+            """,
+        )
+        result = configured_pytester.runpytest(
+            "-p",
+            "no:cacheprovider",
+            "-n",
+            "1",
+        )
+        result.assert_outcomes(passed=1)
+        reports = _load_reports(configured_pytester)
+        assert reports[0]["total_runs"] == 0
+        assert reports[0]["metadata"].get("incomplete") is not True
+
+    def test_dist_each_preserves_source_worker_separation(
+        self,
+        configured_pytester: Pytester,
+    ) -> None:
+        configured_pytester.makepyfile(
+            test_each="""
+            import pytest
+            from rampart import record_result
+            from rampart.core.result import Result, SafetyStatus
+
+            @pytest.mark.harm("each")
+            def test_each():
+                record_result(Result(status=SafetyStatus.SAFE, summary="each"))
+            """,
+        )
+        result = configured_pytester.runpytest(
+            "-p",
+            "no:cacheprovider",
+            "-n",
+            "2",
+            "--dist",
+            "each",
+        )
+        result.assert_outcomes(passed=2)
+        reports = _load_reports(configured_pytester)
+        streamed = _report_results(reports[0])
+        assert reports[0]["total_runs"] == 2
+        assert [item["metadata"]["_rampart_source_worker"] for item in streamed] == [
+            "gw0",
+            "gw1",
+        ]
+
+    def test_worker_crash_keeps_previously_streamed_result(
+        self,
+        configured_pytester: Pytester,
+    ) -> None:
+        configured_pytester.makepyfile(
+            test_crash="""
+            import os
+            import pytest
+            from rampart import record_result
+            from rampart.core.result import Result, SafetyStatus
+
+            @pytest.mark.harm("crash")
+            def test_0_stream_before_crash():
+                record_result(Result(
+                    status=SafetyStatus.SAFE,
+                    summary="survived",
+                ))
+
+            def test_1_crash_worker():
+                os._exit(3)
+            """,
+        )
+        configured_pytester.runpytest(
+            "-p",
+            "no:cacheprovider",
+            "-n",
+            "1",
+            "--max-worker-restart=0",
+        )
+        reports = _load_reports(configured_pytester)
+        assert reports[0]["total_runs"] == 1
+        assert _report_results(reports[0])[0]["summary"] == "survived"
+        assert reports[0]["metadata"]["incomplete"] is True
+
+    def test_oversized_result_does_not_drop_normal_result(
+        self,
+        configured_pytester: Pytester,
+    ) -> None:
+        configured_pytester.makepyfile(
+            test_cap="""
+            import pytest
+            from rampart import record_result
+            from rampart.core.result import Result, SafetyStatus
+
+            @pytest.mark.harm("cap")
+            def test_0_normal():
+                record_result(Result(status=SafetyStatus.SAFE, summary="normal"))
+
+            @pytest.mark.harm("cap")
+            def test_1_oversized():
+                record_result(Result(
+                    status=SafetyStatus.SAFE,
+                    summary="x" * 5000,
+                ))
+            """,
+        )
+        result = configured_pytester.runpytest(
+            "-p",
+            "no:cacheprovider",
+            "-n",
+            "1",
+            "--rampart-xdist-max-bytes=1024",
+        )
+        result.assert_outcomes(passed=2)
+        reports = _load_reports(configured_pytester)
+        streamed = _report_results(reports[0])
+        assert reports[0]["total_runs"] == 2
+        assert any(item["summary"] == "normal" for item in streamed)
+        assert any(
+            item["metadata"].get("_rampart_transport_truncated") is True
+            for item in streamed
+        )
+        assert reports[0]["metadata"]["incomplete"] is True
 
 
 class TestXdistTrialAggregation:
@@ -306,18 +595,31 @@ class TestXdistMetadata:
         assert "population_summary" in reports[0]
 
     def test_size_cap_marks_run_incomplete(self, configured_pytester: Pytester) -> None:
-        """Forcing a 1-byte cap surfaces incompleteness in report metadata.
+        """An oversized Result surfaces incompleteness in report metadata.
 
         Triggers the truncation path so the controller must record
         ``incomplete=True`` plus a reason in the merged report.
         """
-        _setup_simple_tests(configured_pytester)
+        configured_pytester.makepyfile(
+            test_size_cap="""
+            import pytest
+            from rampart import record_result
+            from rampart.core.result import Result, SafetyStatus
+
+            @pytest.mark.harm("cap")
+            def test_oversized():
+                record_result(Result(
+                    status=SafetyStatus.SAFE,
+                    summary="x" * 10_000,
+                ))
+            """,
+        )
         configured_pytester.runpytest(
             "-p",
             "no:cacheprovider",
             "-n",
-            "2",
-            "--rampart-xdist-max-bytes=1",
+            "1",
+            f"--rampart-xdist-max-bytes={MIN_RESULT_SIZE_LIMIT_BYTES}",
         )
         reports = _load_reports(configured_pytester)
         assert len(reports) == 1
