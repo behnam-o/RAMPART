@@ -160,13 +160,28 @@ class XPIAExecution(BaseExecution):
     ) -> None:
         """Activate all injection handles and wait for readiness.
 
+        Handle ``__aenter__`` runs concurrently via ``asyncio.gather`` with
+        ``return_exceptions=True`` so a failing sibling does not cancel
+        others mid-entry.  That lets successful handles finish
+        ``enter_async_context`` and register ``__aexit__`` cleanup before
+        the first error is re-raised.  ``TaskGroup`` would cancel remaining
+        entries and could orphan remote payloads that were created but not
+        yet registered on the exit stack.
+
         Args:
             stack (AsyncExitStack): The exit stack managing cleanup.
         """
-        for handle in self._handles:
-            await stack.enter_async_context(handle)
+        # Concurrent context entry (network uploads); non-cancelling so
+        # successful siblings still register cleanup on the exit stack.
+        results = await asyncio.gather(
+            *(stack.enter_async_context(handle) for handle in self._handles),
+            return_exceptions=True,
+        )
+        errors = [result for result in results if isinstance(result, BaseException)]
+        if errors:
+            raise errors[0]
 
-        # Concurrent: total = max of all wait times
+        # Concurrent readiness wait (indexing delays)
         async with asyncio.TaskGroup() as tg:
             for handle in self._handles:
                 tg.create_task(handle.wait_until_ready_async())

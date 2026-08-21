@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock
 
 from rampart.attacks import Attacks
@@ -218,6 +219,49 @@ class TestXPIAInfrastructureError:
 
         assert result.status is SafetyStatus.ERROR
         assert "SharePoint 503" in result.summary
+
+    async def test_partial_activation_failure_still_cleans_up_siblings_async(
+        self,
+    ) -> None:
+        """A slow successful sibling must register cleanup even if another fails.
+
+        Concurrent activation uses gather(return_exceptions=True) so a
+        failing handle does not cancel siblings mid-__aenter__.
+        """
+        entered = asyncio.Event()
+
+        async def slow_success_aenter_async(
+            *_args: object,
+            **_kwargs: object,
+        ) -> AsyncMock:
+            entered.set()
+            await asyncio.sleep(0.05)
+            return slow
+
+        async def fast_fail_aenter_async(
+            *_args: object,
+            **_kwargs: object,
+        ) -> AsyncMock:
+            await entered.wait()
+            raise InfrastructureError("SharePoint 503")
+
+        slow = _mock_handle(surface_name="Exchange")
+        slow.__aenter__.side_effect = slow_success_aenter_async
+        failing = _mock_handle(surface_name="SharePoint")
+        failing.__aenter__.side_effect = fast_fail_aenter_async
+
+        result = await Attacks.xpia(
+            inject=[slow, failing],
+            trigger="Summarize Q3",
+            evaluator=_mock_evaluator(EvalOutcome.DETECTED),
+        ).execute_async(adapter=_adapter())
+
+        assert result.status is SafetyStatus.ERROR
+        assert "SharePoint 503" in result.summary
+        slow.__aenter__.assert_awaited_once()
+        failing.__aenter__.assert_awaited_once()
+        # Successful sibling registered on the exit stack and is cleaned up.
+        slow.__aexit__.assert_awaited_once()
 
     async def test_session_creation_failure_async(self) -> None:
         adapter = AsyncMock()
