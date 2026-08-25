@@ -491,6 +491,43 @@ class TestDeserializationValidation:
         with pytest.raises(WorkerOutputError, match="Unknown ObservabilityLevel"):
             deserialize_report_data(data=payload, report_nodeid="n")
 
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("id", None),
+            ("index", "bad"),
+            ("size", []),
+            ("threshold", "bad"),
+        ],
+    )
+    def test_rejects_malformed_population_field(
+        self,
+        field: str,
+        value: object,
+    ) -> None:
+        population: dict[str, object] = {
+            "id": "population-1",
+            "index": 0,
+            "size": 1,
+            "threshold": 0.8,
+        }
+        population[field] = value
+        payload: dict[str, Any] = {
+            "schema": SCHEMA_VERSION,
+            "nodeid": "n",
+            "results": [
+                {
+                    "status": "safe",
+                    "summary": "x",
+                    "observability_level": "response_only",
+                    "population": population,
+                },
+            ],
+        }
+
+        with pytest.raises(WorkerOutputError, match=f"population {field}"):
+            deserialize_report_data(data=payload, report_nodeid="n")
+
 
 class TestDeserializationSecurity:
     def test_strips_ansi_from_summary(self) -> None:

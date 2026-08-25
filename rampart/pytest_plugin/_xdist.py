@@ -1126,6 +1126,54 @@ def _deserialize_injection_record(*, data: object) -> InjectionRecord:
     )
 
 
+def _deserialize_population_ref(*, data: object) -> PopulationRef | None:
+    """Deserialize and validate an optional PopulationRef.
+
+    Args:
+        data (object): Serialized population data, or None.
+
+    Returns:
+        PopulationRef | None: The deserialized population reference.
+
+    Raises:
+        WorkerOutputError: If a population field has an invalid type.
+    """
+    if data is None:
+        return None
+    if not isinstance(data, dict):
+        msg = f"Expected dict for population, got {type(data).__name__}."
+        raise WorkerOutputError(msg)
+    typed = cast("dict[str, Any]", data)
+    population_id = typed.get("id")
+    index = typed.get("index")
+    size = typed.get("size")
+    threshold = typed.get("threshold")
+    if not isinstance(population_id, str):
+        msg = f"Expected string for population id, got {type(population_id).__name__}."
+        raise WorkerOutputError(msg)
+    if type(index) is not int:
+        msg = f"Expected integer for population index, got {type(index).__name__}."
+        raise WorkerOutputError(msg)
+    if type(size) is not int:
+        msg = f"Expected integer for population size, got {type(size).__name__}."
+        raise WorkerOutputError(msg)
+    if isinstance(threshold, bool) or not isinstance(threshold, int | float):
+        msg = (
+            "Expected number for population threshold, got "
+            f"{type(threshold).__name__}."
+        )
+        raise WorkerOutputError(msg)
+    if not math.isfinite(threshold):
+        msg = f"Expected finite number for population threshold, got {threshold!r}."
+        raise WorkerOutputError(msg)
+    return PopulationRef(
+        id=population_id,
+        index=index,
+        size=size,
+        threshold=float(threshold),
+    )
+
+
 def _deserialize_result(*, data: object) -> Result:
     """Deserialize a Result.
 
@@ -1173,16 +1221,7 @@ def _deserialize_result(*, data: object) -> Result:
                 raw_injections if isinstance(raw_injections, list) else [],
             )
         ],
-        population=(
-            PopulationRef(
-                id=str(raw_population.get("id", "")),
-                index=int(raw_population.get("index", 0)),
-                size=int(raw_population.get("size", 0)),
-                threshold=float(raw_population.get("threshold", 0.0)),
-            )
-            if isinstance(raw_population, dict)
-            else None
-        ),
+        population=_deserialize_population_ref(data=raw_population),
         metadata=cast("dict[str, Any]", metadata),
     )
 
