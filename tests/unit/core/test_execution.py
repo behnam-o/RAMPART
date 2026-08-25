@@ -14,6 +14,7 @@ from rampart.core.execution import (
     ExecutionEvent,
     ExecutionEventData,
     ExecutionEventHandler,
+    execute_trials_async,
 )
 from rampart.core.manifest import AppManifest
 from rampart.core.result import PopulationRef, PopulationResult, Result, SafetyStatus
@@ -77,15 +78,22 @@ class _SuccessExecution(BaseExecution):
         return Result(status=SafetyStatus.SAFE, summary="ok")
 
 
+class _ConcurrencyTracker:
+    """Shared observer of trial concurrency."""
+
+    def __init__(self, *, expected_concurrency: int) -> None:
+        self.active_count = 0
+        self.max_active_count = 0
+        self.expected_concurrency = expected_concurrency
+        self._release = asyncio.Event()
+
+
 class _ConcurrencyTrackingExecution(BaseExecution):
     """Execution that records the number of overlapping trials."""
 
-    def __init__(self, *, expected_concurrency: int) -> None:
+    def __init__(self, *, tracker: _ConcurrencyTracker) -> None:
         super().__init__()
-        self.active_count = 0
-        self.max_active_count = 0
-        self._expected_concurrency = expected_concurrency
-        self._release = asyncio.Event()
+        self.tracker = tracker
 
     @property
     def strategy_name(self) -> str:
@@ -94,12 +102,15 @@ class _ConcurrencyTrackingExecution(BaseExecution):
 
     async def _execute_async(self, *, adapter: AgentAdapter) -> Result:
         """Wait until the expected number of trials overlap."""
-        self.active_count += 1
-        self.max_active_count = max(self.max_active_count, self.active_count)
-        if self.active_count == self._expected_concurrency:
-            self._release.set()
-        await self._release.wait()
-        self.active_count -= 1
+        self.tracker.active_count += 1
+        self.tracker.max_active_count = max(
+            self.tracker.max_active_count,
+            self.tracker.active_count,
+        )
+        if self.tracker.active_count == self.tracker.expected_concurrency:
+            self.tracker._release.set()
+        await self.tracker._release.wait()
+        self.tracker.active_count -= 1
         return Result(status=SafetyStatus.SAFE, summary="ok")
 
 
@@ -186,10 +197,28 @@ class TestBaseExecutionLifecycle:
 
 
 class TestExecuteTrials:
-    async def test_returns_population_result_async(self) -> None:
-        execution = _SuccessExecution()
+    async def test_factory_creates_a_distinct_execution_per_trial_async(self) -> None:
+        executions: list[BaseExecution] = []
 
-        population = await execution.execute_trials_async(
+        def create_execution() -> BaseExecution:
+            execution = _SuccessExecution()
+            executions.append(execution)
+            return execution
+
+        population = await execute_trials_async(
+            execution_factory=create_execution,
+            adapter=_StubAdapter(),
+            n=3,
+            threshold=1.0,
+        )
+
+        assert len(executions) == 3
+        assert len({id(execution) for execution in executions}) == 3
+        assert population.executed_count == 3
+
+    async def test_returns_population_result_async(self) -> None:
+        population = await execute_trials_async(
+            execution_factory=_SuccessExecution,
             adapter=_StubAdapter(),
             n=3,
             threshold=0.8,
@@ -201,9 +230,9 @@ class TestExecuteTrials:
 
     async def test_runs_normal_lifecycle_for_every_trial_async(self) -> None:
         handler = _RecordingHandler()
-        execution = _SuccessExecution(event_handlers=[handler])
 
-        population = await execution.execute_trials_async(
+        population = await execute_trials_async(
+            execution_factory=lambda: _SuccessExecution(event_handlers=[handler]),
             adapter=_StubAdapter(),
             n=3,
             threshold=1.0,
@@ -216,25 +245,28 @@ class TestExecuteTrials:
         ] * 3
 
     async def test_runs_trials_with_opt_in_bounded_concurrency_async(self) -> None:
-        execution = _ConcurrencyTrackingExecution(expected_concurrency=2)
+        tracker = _ConcurrencyTracker(expected_concurrency=2)
 
-        population = await execution.execute_trials_async(
+        population = await execute_trials_async(
+            execution_factory=lambda: _ConcurrencyTrackingExecution(
+                tracker=tracker,
+            ),
             adapter=_StubAdapter(),
             n=4,
             threshold=1.0,
             max_concurrency=2,
         )
 
-        assert execution.max_active_count == 2
+        assert tracker.max_active_count == 2
         refs = [result.population for result in population.results]
         assert all(ref is not None for ref in refs)
         assert [ref.index for ref in refs if ref is not None] == [0, 1, 2, 3]
 
     async def test_attaches_population_ref_before_post_execute_async(self) -> None:
         handler = _RecordingHandler()
-        execution = _SuccessExecution(event_handlers=[handler])
 
-        population = await execution.execute_trials_async(
+        population = await execute_trials_async(
+            execution_factory=lambda: _SuccessExecution(event_handlers=[handler]),
             adapter=_StubAdapter(),
             n=3,
             threshold=0.8,
@@ -256,14 +288,14 @@ class TestExecuteTrials:
         assert post_refs == refs
 
     async def test_separate_populations_have_distinct_ids_async(self) -> None:
-        execution = _SuccessExecution()
-
-        first = await execution.execute_trials_async(
+        first = await execute_trials_async(
+            execution_factory=_SuccessExecution,
             adapter=_StubAdapter(),
             n=1,
             threshold=1.0,
         )
-        second = await execution.execute_trials_async(
+        second = await execute_trials_async(
+            execution_factory=_SuccessExecution,
             adapter=_StubAdapter(),
             n=1,
             threshold=1.0,
@@ -277,9 +309,11 @@ class TestExecuteTrials:
 
     async def test_error_result_has_population_ref_on_post_execute_async(self) -> None:
         handler = _RecordingHandler()
-        execution = _InfraErrorExecution(event_handlers=[handler])
 
-        population = await execution.execute_trials_async(
+        population = await execute_trials_async(
+            execution_factory=lambda: _InfraErrorExecution(
+                event_handlers=[handler],
+            ),
             adapter=_StubAdapter(),
             n=1,
             threshold=1.0,
@@ -294,10 +328,9 @@ class TestExecuteTrials:
         assert post.result.population is result.population
 
     async def test_rejects_non_positive_trial_count_async(self) -> None:
-        execution = _SuccessExecution()
-
         with pytest.raises(ValueError, match="n must be greater"):
-            await execution.execute_trials_async(
+            await execute_trials_async(
+                execution_factory=_SuccessExecution,
                 adapter=_StubAdapter(),
                 n=0,
                 threshold=0.8,
@@ -305,10 +338,9 @@ class TestExecuteTrials:
 
     @pytest.mark.parametrize("n", [True, 1.5, "3"])
     async def test_rejects_invalid_trial_count_type_async(self, n: object) -> None:
-        execution = _SuccessExecution()
-
         with pytest.raises(TypeError, match="n must be a non-boolean integer"):
-            await execution.execute_trials_async(
+            await execute_trials_async(
+                execution_factory=_SuccessExecution,
                 adapter=_StubAdapter(),
                 n=n,  # ty: ignore[invalid-argument-type]
                 threshold=0.8,
@@ -316,10 +348,12 @@ class TestExecuteTrials:
 
     async def test_rejects_invalid_threshold_before_execution_async(self) -> None:
         handler = _RecordingHandler()
-        execution = _SuccessExecution(event_handlers=[handler])
 
         with pytest.raises(ValueError, match="threshold must be between"):
-            await execution.execute_trials_async(
+            await execute_trials_async(
+                execution_factory=lambda: _SuccessExecution(
+                    event_handlers=[handler],
+                ),
                 adapter=_StubAdapter(),
                 n=3,
                 threshold=1.1,
@@ -332,13 +366,12 @@ class TestExecuteTrials:
         self,
         max_concurrency: object,
     ) -> None:
-        execution = _SuccessExecution()
-
         with pytest.raises(
             TypeError,
             match="max_concurrency must be a non-boolean integer",
         ):
-            await execution.execute_trials_async(
+            await execute_trials_async(
+                execution_factory=_SuccessExecution,
                 adapter=_StubAdapter(),
                 n=3,
                 threshold=0.8,
@@ -346,10 +379,9 @@ class TestExecuteTrials:
             )
 
     async def test_rejects_non_positive_max_concurrency_async(self) -> None:
-        execution = _SuccessExecution()
-
         with pytest.raises(ValueError, match="max_concurrency must be greater"):
-            await execution.execute_trials_async(
+            await execute_trials_async(
+                execution_factory=_SuccessExecution,
                 adapter=_StubAdapter(),
                 n=3,
                 threshold=0.8,
@@ -358,6 +390,16 @@ class TestExecuteTrials:
 
 
 class TestPopulationPublicExports:
+    def test_execute_trials_exported_from_rampart(self) -> None:
+        from rampart import execute_trials_async as top_level_execute_trials_async
+
+        assert top_level_execute_trials_async is execute_trials_async
+
+    def test_execute_trials_exported_from_rampart_core(self) -> None:
+        from rampart.core import execute_trials_async as core_execute_trials_async
+
+        assert core_execute_trials_async is execute_trials_async
+
     def test_exported_from_rampart(self) -> None:
         from rampart import PopulationResult as TopLevelPopulationResult
 

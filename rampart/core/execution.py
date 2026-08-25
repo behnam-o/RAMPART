@@ -23,6 +23,8 @@ from rampart.core.result import PopulationRef, PopulationResult, Result, SafetyS
 from rampart.core.types import EvalContext, Request, Response, Turn
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from rampart.core.adapter import AgentAdapter
     from rampart.core.evaluator import Evaluator
     from rampart.core.manifest import AppManifest
@@ -241,83 +243,6 @@ class BaseExecution(ABC):
             population=None,
         )
 
-    async def execute_trials_async(
-        self,
-        *,
-        adapter: AgentAdapter,
-        n: int,
-        threshold: float,
-        max_concurrency: int = 1,
-    ) -> PopulationResult:
-        """Execute a population of independent trials.
-
-        Each trial uses the normal ``execute_async`` lifecycle, including
-        event dispatch and result collection. The returned aggregate provides
-        the single logical verdict that callers should assert. Execution
-        strategies are responsible for creating a fresh agent session during
-        each call to ``execute_async``. Trials run sequentially by default;
-        set ``max_concurrency`` greater than 1 to opt into bounded concurrency.
-
-        Note: Trials are only statistically meaningful when the adapter is stateless
-        across sessions. A stateful adapter (e.g. memory-backed) makes pass_rate an
-        unreliable estimate.
-
-        Args:
-            adapter (AgentAdapter): The agent to test.
-            n (int): Number of independent trials to execute.
-            threshold (float): Required safe-result rate from 0.0 to 1.0.
-            max_concurrency (int): Maximum number of concurrent trials.
-                Defaults to 1.
-
-        Returns:
-            PopulationResult: Aggregate verdict and individual trial results.
-
-        Raises:
-            TypeError: If n or max_concurrency is not a non-boolean integer.
-            ValueError: If n or max_concurrency is less than 1, or threshold
-                is outside [0.0, 1.0].
-        """
-        if not isinstance(n, int) or isinstance(n, bool):
-            msg = "n must be a non-boolean integer"
-            raise TypeError(msg)
-        if n < 1:
-            msg = "n must be greater than or equal to 1"
-            raise ValueError(msg)
-        if not 0.0 <= threshold <= 1.0:
-            msg = "threshold must be between 0.0 and 1.0"
-            raise ValueError(msg)
-        if not isinstance(max_concurrency, int) or isinstance(max_concurrency, bool):
-            msg = "max_concurrency must be a non-boolean integer"
-            raise TypeError(msg)
-        if max_concurrency < 1:
-            msg = "max_concurrency must be greater than or equal to 1"
-            raise ValueError(msg)
-
-        population_id = uuid.uuid4().hex
-        semaphore = asyncio.Semaphore(max_concurrency)
-        async with asyncio.TaskGroup() as task_group:
-            tasks = [
-                task_group.create_task(
-                    self._execute_trial_async(
-                        adapter=adapter,
-                        population=PopulationRef(
-                            id=population_id,
-                            index=index,
-                            size=n,
-                            threshold=threshold,
-                        ),
-                        semaphore=semaphore,
-                    ),
-                )
-                for index in range(n)
-            ]
-        results = [task.result() for task in tasks]
-
-        return PopulationResult(
-            results=results,
-            threshold=threshold,
-        )
-
     @abstractmethod
     async def _execute_async(self, *, adapter: AgentAdapter) -> Result:
         """Core execution logic implemented by each strategy.
@@ -384,24 +309,6 @@ class BaseExecution(ABC):
         )
         return result
 
-    async def _execute_trial_async(
-        self,
-        *,
-        adapter: AgentAdapter,
-        population: PopulationRef,
-        semaphore: asyncio.Semaphore,
-    ) -> Result:
-        """Execute one population trial within the concurrency bound.
-
-        Returns:
-            Result: The completed trial result.
-        """
-        async with semaphore:
-            return await self._execute_once_async(
-                adapter=adapter,
-                population=population,
-            )
-
     async def _fire_async(
         self,
         event: ExecutionEvent,
@@ -440,6 +347,113 @@ class BaseExecution(ABC):
                     event.value,
                     exc_info=True,
                 )
+
+
+async def execute_trials_async(
+    *,
+    execution_factory: Callable[[], BaseExecution],
+    adapter: AgentAdapter,
+    n: int,
+    threshold: float,
+    max_concurrency: int = 1,
+) -> PopulationResult:
+    """Execute independent trials using a fresh execution from the factory.
+
+    Args:
+        execution_factory (Callable[[], BaseExecution]): Creates one complete
+            execution, including trial-scoped dependencies, per trial.
+        adapter (AgentAdapter): The agent to test.
+        n (int): Number of independent trials to execute.
+        threshold (float): Required safe-result rate from 0.0 to 1.0.
+        max_concurrency (int): Maximum number of concurrent trials.
+
+    Returns:
+        PopulationResult: Aggregate verdict and individual trial results.
+
+    Raises:
+        TypeError: If n or max_concurrency is not a non-boolean integer.
+        ValueError: If n or max_concurrency is less than 1, or threshold
+            is outside [0.0, 1.0].
+    """
+    _validate_trial_parameters(
+        n=n,
+        threshold=threshold,
+        max_concurrency=max_concurrency,
+    )
+    population_id = uuid.uuid4().hex
+    semaphore = asyncio.Semaphore(max_concurrency)
+    async with asyncio.TaskGroup() as task_group:
+        tasks = [
+            task_group.create_task(
+                _execute_factory_trial_async(
+                    execution_factory=execution_factory,
+                    adapter=adapter,
+                    population=PopulationRef(
+                        id=population_id,
+                        index=index,
+                        size=n,
+                        threshold=threshold,
+                    ),
+                    semaphore=semaphore,
+                ),
+            )
+            for index in range(n)
+        ]
+    return PopulationResult(
+        results=[task.result() for task in tasks],
+        threshold=threshold,
+    )
+
+
+def _validate_trial_parameters(
+    *,
+    n: int,
+    threshold: float,
+    max_concurrency: int,
+) -> None:
+    """Validate trial population parameters.
+
+    Raises:
+        TypeError: If n or max_concurrency is not a non-boolean integer.
+        ValueError: If n or max_concurrency is less than 1, or threshold
+            is outside [0.0, 1.0].
+    """
+    if not isinstance(n, int) or isinstance(n, bool):
+        msg = "n must be a non-boolean integer"
+        raise TypeError(msg)
+    if n < 1:
+        msg = "n must be greater than or equal to 1"
+        raise ValueError(msg)
+    if not 0.0 <= threshold <= 1.0:
+        msg = "threshold must be between 0.0 and 1.0"
+        raise ValueError(msg)
+    if not isinstance(max_concurrency, int) or isinstance(max_concurrency, bool):
+        msg = "max_concurrency must be a non-boolean integer"
+        raise TypeError(msg)
+    if max_concurrency < 1:
+        msg = "max_concurrency must be greater than or equal to 1"
+        raise ValueError(msg)
+
+
+async def _execute_factory_trial_async(
+    *,
+    execution_factory: Callable[[], BaseExecution],
+    adapter: AgentAdapter,
+    population: PopulationRef,
+    semaphore: asyncio.Semaphore,
+) -> Result:
+    """Construct and execute one trial within the concurrency bound.
+
+    Returns:
+        Result: The completed trial result.
+    """
+    async with semaphore:
+        execution = execution_factory()
+        return await BaseExecution._execute_once_async(  # ruff: ignore[private-member-access]
+            execution,
+            adapter=adapter,
+            population=population,
+        )
 
 
 async def evaluate_turn_async(

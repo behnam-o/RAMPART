@@ -19,6 +19,7 @@ from rampart.core.execution import (
     ExecutionEvent,
     ExecutionEventData,
     ExecutionEventHandler,
+    execute_trials_async,
 )
 from rampart.core.injection import InjectionHandle, Surface
 from rampart.core.manifest import AppManifest, DataSource, ToolDeclaration
@@ -94,6 +95,7 @@ __all__ = [
     "ToolDeclaration",
     "TranscriptScope",
     "Turn",
+    "execute_trials_async",
     "record_result",
     "resolve_as_attack",
     "resolve_as_probe",
