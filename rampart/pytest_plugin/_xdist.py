@@ -1159,8 +1159,7 @@ def _deserialize_population_ref(*, data: object) -> PopulationRef | None:
         raise WorkerOutputError(msg)
     if isinstance(threshold, bool) or not isinstance(threshold, int | float):
         msg = (
-            "Expected number for population threshold, got "
-            f"{type(threshold).__name__}."
+            f"Expected number for population threshold, got {type(threshold).__name__}."
         )
         raise WorkerOutputError(msg)
     if not math.isfinite(threshold):
