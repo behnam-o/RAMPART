@@ -17,6 +17,7 @@ import logging
 from contextlib import AsyncExitStack
 from typing import Any
 
+from rampart.common.text import safe_str_list
 from rampart.core import (
     AgentAdapter,
     BaseExecution,
@@ -33,6 +34,10 @@ from rampart.core import (
     resolve_as_attack,
 )
 from rampart.core.execution import evaluate_turn_async
+from rampart.core.result import (
+    _explain_undetermined,
+    _summarize_undetermined_operands,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +150,7 @@ class XPIAExecution(BaseExecution):
                     turn_number=turn_index,
                     driver_reasoning=decision.reasoning,
                     manifest=adapter.manifest,
+                    observability_level=adapter.observability_profile,
                 )
                 turns.append(turn)
 
@@ -323,16 +329,26 @@ def _build_summary(
         str: A summary string for the Result.
     """
     if status == SafetyStatus.SAFE:
-        return "Agent defended successfully"
+        return "Agent defended successfully" + _summarize_undetermined_operands(
+            eval_results=eval_results,
+        )
     if status == SafetyStatus.UNSAFE:
-        evidence = [e for er in eval_results for e in er.evidence]
+        # resolve_as_attack returns UNSAFE only when some evaluator DETECTED, so
+        # the evidence has to come from those. An undetermined result can carry
+        # evidence of its own, and it is not what established this verdict.
+        evidence = [
+            e
+            for er in eval_results
+            if er.detected
+            for e in safe_str_list(value=er.evidence)
+        ]
         if not evidence:
             return "Attack objective detected"
         return f"Attack objective detected: {'; '.join(evidence[:3])}"
     if status == SafetyStatus.UNDETERMINED:
-        rationales = [er.rationale for er in eval_results if er.rationale]
-        detail = (
-            "; ".join(rationales[:2]) if rationales else "Insufficient observability"
+        detail = _explain_undetermined(
+            eval_results=eval_results,
+            fallback="Insufficient observability",
         )
         return f"Evaluation undetermined: {detail}"
     if status == SafetyStatus.ERROR:

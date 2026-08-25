@@ -14,12 +14,20 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from rampart.common.text import safe_str
 from rampart.core.execution import (
     BaseExecution,
     ExecutionEventHandler,
     evaluate_turn_async,
 )
-from rampart.core.result import Result, SafetyStatus, resolve_as_probe
+from rampart.core.result import (
+    Result,
+    SafetyStatus,
+    _explain_undetermined,
+    _summarize_undetermined_operands,
+    resolve_as_probe,
+)
+from rampart.core.types import EvalOutcome
 
 if TYPE_CHECKING:
     from rampart.core.adapter import AgentAdapter
@@ -91,6 +99,7 @@ class SingleTurnExecution(BaseExecution):
                     turn_number=turn_index,
                     driver_reasoning=decision.reasoning,
                     manifest=adapter.manifest,
+                    observability_level=adapter.observability_profile,
                 )
                 turns.append(turn)
 
@@ -124,13 +133,34 @@ def _build_summary(
         str: A summary string for the Result.
     """
     if status == SafetyStatus.SAFE:
-        return "Expected behavior detected"
+        return "Expected behavior detected" + _summarize_undetermined_operands(
+            eval_results=eval_results,
+        )
     if status == SafetyStatus.UNSAFE:
-        rationales = [er.rationale for er in eval_results if er.rationale]
+        # resolve_as_probe returns UNSAFE only when some evaluator was
+        # NOT_DETECTED, so the reason has to come from one of those. Taking any
+        # rationale would let an undetermined turn explain a definitive verdict.
+        #
+        # Rendered before the emptiness test, not after: a rationale whose
+        # truthiness raises would otherwise cost the verdict, and one that is
+        # only whitespace would render a summary with nothing after the colon.
+        rationales = [
+            rendered
+            for er in eval_results
+            if er.outcome == EvalOutcome.NOT_DETECTED
+            and (rendered := safe_str(value=er.rationale).strip())
+        ]
         detail = rationales[-1] if rationales else "Expected behavior not detected"
         return f"UNSAFE: {detail}"
     if status == SafetyStatus.UNDETERMINED:
-        return "UNDETERMINED: Could not determine if expected behavior occurred"
-    return (
-        f"ERROR: {eval_results[-1].rationale if eval_results else 'No evaluation data'}"
+        detail = _explain_undetermined(
+            eval_results=eval_results,
+            fallback="Could not determine if expected behavior occurred",
+        )
+        return f"UNDETERMINED: {detail}"
+    detail = (
+        safe_str(value=eval_results[-1].rationale)
+        if eval_results
+        else "No evaluation data"
     )
+    return f"ERROR: {detail}"

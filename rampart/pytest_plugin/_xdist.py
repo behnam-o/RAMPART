@@ -24,6 +24,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, cast
 
 from rampart.common.deprecation import emit_deprecation_warning
+from rampart.common.text import safe_float, safe_str, safe_str_list
 from rampart.common.text import strip_ansi as _strip_ansi_impl
 from rampart.core.result import (
     HarmCategory,
@@ -314,15 +315,6 @@ def _sanitize_metadata(
     return sanitized
 
 
-def _safe_float(*, value: float) -> float | None:
-    """Coerce non-finite floats to None for JSON safety.
-
-    Returns:
-        float | None: ``value`` when finite, else ``None``.
-    """
-    return value if math.isfinite(value) else None
-
-
 def _isoformat(*, timestamp: datetime | None) -> str | None:
     """Convert a datetime to ISO 8601 string, or None.
 
@@ -340,9 +332,12 @@ def _serialize_eval_result(*, eval_result: EvalResult) -> dict[str, Any]:
     """
     return {
         "outcome": eval_result.outcome.value,
-        "confidence": _safe_float(value=eval_result.confidence),
-        "evidence": [str(e) for e in eval_result.evidence],
-        "rationale": eval_result.rationale,
+        "confidence": safe_float(value=eval_result.confidence),
+        "evidence": safe_str_list(value=eval_result.evidence),
+        "rationale": safe_str(value=eval_result.rationale),
+        "undetermined_operands": safe_str_list(
+            value=eval_result.undetermined_operands,
+        ),
     }
 
 
@@ -494,7 +489,7 @@ def _serialize_result(*, result: Result, nodeid: str) -> dict[str, Any]:
         "status": result.status.value,
         "summary": result.summary,
         "turns": [_serialize_turn(turn=t, nodeid=nodeid) for t in result.turns],
-        "duration_seconds": _safe_float(value=result.duration_seconds),
+        "duration_seconds": safe_float(value=result.duration_seconds),
         "harm_category": (
             str(result.harm_category) if result.harm_category is not None else None
         ),
@@ -579,7 +574,10 @@ def _truncated_result_data(
             max_bytes=_TRUNCATED_ATTRIBUTION_MAX_BYTES,
         ),
         "strategy": "xdist-transport",
-        "observability_level": ObservabilityLevel.RESPONSE_ONLY.value,
+        # The real level, not a constant. The marker replaces a result that
+        # was too big to send, and the level it was gathered under is not the
+        # part that overflowed.
+        "observability_level": result.observability_level.value,
         "injections": [],
         "metadata": {
             "_pytest_test_name": _bounded_attribution(
@@ -746,7 +744,7 @@ def serialize_worker_data(
             {
                 "clone_nodeid": clone_nodeid,
                 "base_nodeid": spec.base_nodeid,
-                "threshold": _safe_float(value=spec.threshold) or 0.0,
+                "threshold": safe_float(value=spec.threshold) or 0.0,
             }
             for clone_nodeid, spec in session.trial_specs.items()
         ],
@@ -879,6 +877,31 @@ def _deserialize_datetime(*, value: object) -> datetime | None:
         raise WorkerOutputError(msg) from exc
 
 
+def _deserialize_confidence(*, typed: dict[str, Any]) -> float:
+    """Reconstruct a serialized confidence without inflating a sanitized one.
+
+    An older worker omits the field, and that still means full confidence. A
+    field that is present but was sanitized to ``null`` on the way out, or that
+    carries a rejected type such as ``bool``, must not come back as ``1.0``: the
+    direct JSON report shows ``null`` for it, so the round trip returns ``NaN``,
+    which the serializer renders back to ``null`` and keeps both paths in step.
+
+    Args:
+        typed (dict[str, Any]): The deserialized EvalResult mapping.
+
+    Returns:
+        float: The reconstructed confidence, or ``NaN`` when it was present but
+            not a usable finite number.
+    """
+    if "confidence" not in typed:
+        return 1.0
+    raw_confidence = typed["confidence"]
+    if isinstance(raw_confidence, bool) or not isinstance(raw_confidence, int | float):
+        return math.nan
+    number = float(raw_confidence)
+    return number if math.isfinite(number) else math.nan
+
+
 def _deserialize_eval_result(*, data: object) -> EvalResult | None:
     """Deserialize an EvalResult, or None when input is None.
 
@@ -895,10 +918,7 @@ def _deserialize_eval_result(*, data: object) -> EvalResult | None:
         raise WorkerOutputError(msg)
     typed = cast("dict[str, Any]", data)
     outcome = _deserialize_eval_outcome(value=typed.get("outcome"))
-    raw_confidence = typed.get("confidence")
-    confidence = (
-        float(raw_confidence) if isinstance(raw_confidence, int | float) else 1.0
-    )
+    confidence = _deserialize_confidence(typed=typed)
     raw_evidence = typed.get("evidence", [])
     evidence_items = cast(
         "list[Any]",
@@ -906,11 +926,26 @@ def _deserialize_eval_result(*, data: object) -> EvalResult | None:
     )
     evidence: list[str] = [_strip_ansi(text=str(e)) for e in evidence_items]
     rationale = _strip_ansi(text=str(typed.get("rationale", "")))
+    raw_undetermined = typed.get("undetermined_operands", [])
+    undetermined_items = cast(
+        "list[Any]",
+        raw_undetermined if isinstance(raw_undetermined, list) else [],
+    )
+    # Stripping can collapse two entries onto the same text or empty one, so
+    # dedupe after it to keep the one-distinct-reason-per-entry contract.
+    undetermined: list[str] = list(
+        dict.fromkeys(
+            stripped
+            for u in undetermined_items
+            if (stripped := _strip_ansi(text=str(u)).strip())
+        ),
+    )
     return EvalResult(
         outcome=outcome,
         confidence=confidence,
         evidence=evidence,
         rationale=rationale,
+        undetermined_operands=undetermined,
     )
 
 

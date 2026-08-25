@@ -15,6 +15,7 @@ from rampart.core.result import HarmCategory, Result, SafetyStatus
 from rampart.core.types import (
     EvalOutcome,
     EvalResult,
+    ObservabilityLevel,
     Request,
     Response,
     SideEffect,
@@ -41,6 +42,7 @@ def _result_with_turns(
         turn_number=0,
     )
     return Result(
+        observability_level=ObservabilityLevel.RESPONSE_ONLY,
         status=SafetyStatus.SAFE,
         summary="ok",
         turns=[turn],
@@ -61,6 +63,17 @@ class TestSerializeResult:
         data = sink._serialize_result(result)
 
         assert data["metadata"] == {"conversation_id": "abc-123"}
+
+    def test_result_reports_the_observability_level(self) -> None:
+        # Not the value _result_with_turns defaults to, so a hardcoded
+        # literal in the sink cannot satisfy this.
+        sink = JsonFileReportSink(output_dir=Path("/tmp"))
+        result = _result_with_turns()
+        result.observability_level = ObservabilityLevel.TOOL_AND_SIDE_EFFECTS
+
+        data = sink._serialize_result(result)
+
+        assert data["observability_level"] == "tool_and_side_effects"
 
     def test_turn_response_metadata_appears_in_turns(self) -> None:
         sink = JsonFileReportSink(output_dir=Path("/tmp"))
@@ -94,6 +107,7 @@ class TestSerializeResult:
         )
         turn = Turn(request=Request(prompt="hi"), response=response, turn_number=0)
         result = Result(
+            observability_level=ObservabilityLevel.RESPONSE_ONLY,
             status=SafetyStatus.UNSAFE,
             summary="memory poisoned",
             turns=[turn],
@@ -127,6 +141,7 @@ class TestSerializeResult:
         )
         turn = Turn(request=Request(prompt="hi"), response=response, turn_number=0)
         result = Result(
+            observability_level=ObservabilityLevel.RESPONSE_ONLY,
             status=SafetyStatus.UNSAFE,
             summary="exfiltration",
             turns=[turn],
@@ -152,6 +167,7 @@ class TestSerializeResult:
             ),
         )
         result = Result(
+            observability_level=ObservabilityLevel.RESPONSE_ONLY,
             status=SafetyStatus.UNSAFE,
             summary="bad",
             turns=[turn],
@@ -163,6 +179,132 @@ class TestSerializeResult:
         assert turn_data["eval_outcome"] == "detected"
         assert turn_data["eval_confidence"] == pytest.approx(0.95)
         assert turn_data["eval_rationale"] == "found secret"
+
+    def test_turns_report_a_non_finite_confidence_as_null(self) -> None:
+        # Parity with the xdist path: a NaN confidence must serialize to null
+        # here too, so neither report shows a fabricated number.
+        sink = JsonFileReportSink(output_dir=Path("/tmp"))
+        turn = Turn(
+            request=Request(prompt="hi"),
+            response=Response(text="done"),
+            turn_number=0,
+            eval_result=EvalResult(
+                outcome=EvalOutcome.DETECTED,
+                confidence=float("nan"),
+                rationale="found secret",
+            ),
+        )
+        result = Result(
+            observability_level=ObservabilityLevel.RESPONSE_ONLY,
+            status=SafetyStatus.UNSAFE,
+            summary="bad",
+            turns=[turn],
+        )
+
+        data = sink._serialize_result(result)
+
+        assert data["turns"][0]["eval_confidence"] is None
+
+    def test_turns_include_undetermined_operands_when_present(self) -> None:
+        sink = JsonFileReportSink(output_dir=Path("/tmp"))
+        turn = Turn(
+            request=Request(prompt="hi"),
+            response=Response(text="done"),
+            turn_number=0,
+            eval_result=EvalResult(
+                outcome=EvalOutcome.NOT_DETECTED,
+                undetermined_operands=["side effects not reported"],
+            ),
+        )
+        result = Result(
+            observability_level=ObservabilityLevel.RESPONSE_ONLY,
+            status=SafetyStatus.SAFE,
+            summary="ok",
+            turns=[turn],
+        )
+
+        data = sink._serialize_result(result)
+
+        turn_data = data["turns"][0]
+        assert turn_data["eval_undetermined_operands"] == [
+            "side effects not reported",
+        ]
+
+    def test_a_hostile_operand_value_does_not_lose_the_report(self) -> None:
+        class Boom:
+            def __bool__(self) -> bool:
+                raise RuntimeError("boom")
+
+            def __iter__(self) -> object:
+                raise RuntimeError("boom")
+
+        sink = JsonFileReportSink(output_dir=Path("out"))
+        turn = Turn(
+            request=Request(prompt="go"),
+            response=Response(text="done"),
+            turn_number=0,
+            eval_result=EvalResult(
+                outcome=EvalOutcome.DETECTED,
+                undetermined_operands=Boom(),  # ty: ignore[invalid-argument-type]
+            ),
+        )
+        result = Result(
+            status=SafetyStatus.UNSAFE,
+            summary="real detection",
+            turns=[turn],
+            observability_level=ObservabilityLevel.TOOL_AND_SIDE_EFFECTS,
+        )
+
+        data = sink._serialize_result(result)
+
+        assert data["summary"] == "real detection"
+        assert "eval_undetermined_operands" not in data["turns"][0]
+
+    def test_a_hostile_rationale_does_not_lose_the_report(self) -> None:
+        class Boom:
+            def __str__(self) -> str:
+                raise RuntimeError("boom")
+
+        sink = JsonFileReportSink(output_dir=Path("out"))
+        turn = Turn(
+            request=Request(prompt="go"),
+            response=Response(text="done"),
+            turn_number=0,
+            eval_result=EvalResult(
+                outcome=EvalOutcome.DETECTED,
+                rationale=Boom(),  # ty: ignore[invalid-argument-type]
+            ),
+        )
+        result = Result(
+            status=SafetyStatus.UNSAFE,
+            summary="real detection",
+            turns=[turn],
+            observability_level=ObservabilityLevel.TOOL_AND_SIDE_EFFECTS,
+        )
+
+        data = sink._serialize_result(result)
+
+        assert data["summary"] == "real detection"
+        assert data["turns"][0]["eval_rationale"] == "<unprintable value>"
+
+    def test_turns_omit_undetermined_operands_when_empty(self) -> None:
+        sink = JsonFileReportSink(output_dir=Path("/tmp"))
+        turn = Turn(
+            request=Request(prompt="hi"),
+            response=Response(text="done"),
+            turn_number=0,
+            eval_result=EvalResult(outcome=EvalOutcome.NOT_DETECTED),
+        )
+        result = Result(
+            observability_level=ObservabilityLevel.RESPONSE_ONLY,
+            status=SafetyStatus.SAFE,
+            summary="ok",
+            turns=[turn],
+        )
+
+        data = sink._serialize_result(result)
+
+        assert "eval_undetermined_operands" not in data["turns"][0]
 
     def test_turns_omit_eval_result_when_none(self) -> None:
         sink = JsonFileReportSink(output_dir=Path("/tmp"))
@@ -182,6 +324,7 @@ class TestSerializeResult:
             driver_reasoning="Trying a different angle",
         )
         result = Result(
+            observability_level=ObservabilityLevel.RESPONSE_ONLY,
             status=SafetyStatus.SAFE,
             summary="ok",
             turns=[turn],
