@@ -33,7 +33,7 @@ class MySession:
         pass
 ```
 
-1. Populate `Response.tool_calls` and `Response.side_effects` with everything you can observe. Empty lists mean "no observations," not "nothing happened."
+1. Populate `Response.tool_calls` and `Response.side_effects` with everything you can observe. An empty list is read against the observability level you declare below, so declare it honestly.
 2. Set up session-level state (API connections, browser contexts).
 3. Clean up. Must be idempotent and must not raise.
 
@@ -71,6 +71,10 @@ class MyAdapter:
 | `TOOL_ONLY` | Reports tool calls but not side effects | API returns tool call data |
 | `RESPONSE_ONLY` | Reports only text responses | Black-box agent |
 
+Declare the level honestly. An evaluator that needs an evidence channel your adapter does not report returns `UNDETERMINED` instead of `NOT_DETECTED`, so a gap in the adapter does not come back as a passing test on its own. Composed with `&`, an operand that definitively did not happen still settles the result, so read the note on undetermined operands below before combining evaluators. Evidence the adapter does report still counts either way, so declaring a lower level cannot hide a real detection.
+
+The guarantee is per channel, not per field. A level that reports a channel is taken at its word for what it puts in it, so a tool call reported with redacted or partial arguments still counts as observed and a predicate over those arguments can return `NOT_DETECTED`.
+
 ---
 
 ## Choosing Evaluators
@@ -95,8 +99,8 @@ ToolCalled(
 )
 ```
 
-!!! warning
-    `ToolCalled` requires `TOOL_ONLY` or `TOOL_AND_SIDE_EFFECTS` observability. With `RESPONSE_ONLY`, it always returns `NOT_DETECTED`.
+!!! note
+    `ToolCalled` needs `TOOL_ONLY` or `TOOL_AND_SIDE_EFFECTS` observability. With `RESPONSE_ONLY` it returns `UNDETERMINED`, because an adapter that does not report tool calls cannot tell you the tool was not called.
 
 ### [`ResponseContains`][rampart.evaluators.response_contains.ResponseContains] — Detect Text Patterns
 
@@ -128,6 +132,9 @@ SideEffectOccurred("http_request")
 # POST request to a specific host
 SideEffectOccurred("http_request", method="POST", host="evil.com")
 ```
+
+!!! note
+    `SideEffectOccurred` needs `TOOL_AND_SIDE_EFFECTS` observability. With `TOOL_ONLY` or `RESPONSE_ONLY` it returns `UNDETERMINED`, since those adapters do not report side effects at all.
 
 ### [`LLMJudge`][rampart.evaluators.llm_judge.LLMJudge] — Detect Language-Level Signals
 
@@ -226,6 +233,16 @@ evaluator = ~ResponseContains("I cannot help with that")
 
 !!! tip
     Place the cheaper evaluator on the left side of `|`. The OR operator short-circuits — if the left operand detects, the right is skipped.
+
+!!! note "Undetermined operands"
+    An `UNDETERMINED` operand does not settle a composition on its own. `|` is `DETECTED` if either side detects, `&` is `NOT_DETECTED` if either side does not, and the result is `UNDETERMINED` only when neither side settles it. Both operators produce the same `EvalOutcome` whichever order the operands are written in.
+
+`&` short-circuits only on a `NOT_DETECTED` left operand. An `UNDETERMINED` left operand still runs the right one, so an `LLMJudge` on the right of `&` is called in this case. When you combine two views of the same harm to corroborate it, `&` asks whether both happened, so one operand that definitively did not happen settles the result even if the other could not be observed. Use `|` when either view on its own is enough.
+
+`&` and `|` record every operand they ran that came back `UNDETERMINED`, one distinct reason per entry, in `undetermined_operands` on [`EvalResult`][rampart.core.types.EvalResult], and `~` carries its inner result's entries through. Recording does not move the `EvalOutcome` the operands settled. Where the run resolves `SAFE`, the result remains `SAFE`, but its summary names the parts of the evaluation that were undetermined. Only an operand that actually ran can be recorded, so put the evaluator that depends on adapter observability on the left of `&`, where the `NOT_DETECTED` short-circuit cannot skip it. Under `RESPONSE_ONLY`, `ToolCalled("x") & ResponseContains("absent")` records the tool call gap; the same pair written the other way round reaches the same verdict with nothing recorded. `|` skips its right operand once the left detects, so it has the same limit and the opposite pull from the tip above: the cheap evaluator on the left is faster, the observability-dependent one on the left is better recorded.
+
+!!! warning "A recorded gap does not change the verdict"
+    `SAFE` is the only status that passes, and a run that reaches it is graded a plain pass: `bool(result)` is `True`, the result line reads `PASS`, a trial group counts it toward the pass rate, and pytest exits zero. On such a run the summary and `undetermined_operands` are the only places the gap shows; any other status fails the test on its own account, not because of the gap. To fail a passing run that carries one, read the operands yourself: see [Observability Gaps on a Passing Run](results-and-reporting.md#observability-gaps-on-a-passing-run). XPIA has one separate backstop that does move the verdict, described in [Observability Adjustment](../attacks/xpia.md#observability-adjustment).
 
 ---
 

@@ -43,7 +43,9 @@ from rampart.pytest_plugin._xdist import (
     WORKEROUTPUT_KEY,
     SchemaVersionError,
     WorkerOutputError,
+    _deserialize_eval_result,
     _sanitize,
+    _serialize_eval_result,
     _strip_ansi,
     attach_report_results,
     deserialize_report_data,
@@ -114,12 +116,14 @@ def _make_eval_result(
     confidence: float = 0.9,
     evidence: list[str] | None = None,
     rationale: str = "because",
+    undetermined_operands: list[str] | None = None,
 ) -> EvalResult:
     return EvalResult(
         outcome=outcome,
         confidence=confidence,
         evidence=evidence or [],
         rationale=rationale,
+        undetermined_operands=undetermined_operands or [],
     )
 
 
@@ -352,6 +356,145 @@ class TestSerializationRoundTrip:
         assert outcome is EvalOutcome.NOT_DETECTED
         assert recovered["n"][0].turns[0].eval_result.evidence == ["e1", "e2"]
 
+    def test_a_hostile_evidence_value_does_not_lose_the_payload(self) -> None:
+        class Boom:
+            def __iter__(self) -> object:
+                raise RuntimeError("boom")
+
+        data = _serialize_eval_result(
+            eval_result=EvalResult(
+                outcome=EvalOutcome.DETECTED,
+                rationale="real detection",
+                evidence=Boom(),  # ty: ignore[invalid-argument-type]
+            ),
+        )
+
+        assert data["outcome"] == "detected"
+        assert data["rationale"] == "real detection"
+        assert data["evidence"] == []
+
+    def test_a_hostile_operand_value_does_not_lose_the_payload(self) -> None:
+        class Boom:
+            def __iter__(self) -> object:
+                raise RuntimeError("boom")
+
+        data = _serialize_eval_result(
+            eval_result=EvalResult(
+                outcome=EvalOutcome.DETECTED,
+                rationale="real detection",
+                undetermined_operands=Boom(),  # ty: ignore[invalid-argument-type]
+            ),
+        )
+
+        assert data["outcome"] == "detected"
+        assert data["undetermined_operands"] == []
+
+    def test_a_hostile_rationale_does_not_lose_the_payload(self) -> None:
+        class Boom:
+            def __str__(self) -> str:
+                raise RuntimeError("boom")
+
+        data = _serialize_eval_result(
+            eval_result=EvalResult(
+                outcome=EvalOutcome.DETECTED,
+                rationale=Boom(),  # ty: ignore[invalid-argument-type]
+                evidence=["real evidence"],
+            ),
+        )
+
+        assert data["outcome"] == "detected"
+        assert data["rationale"] == "<unprintable value>"
+        assert data["evidence"] == ["real evidence"]
+
+    def test_undetermined_operands_round_trip(self) -> None:
+        eval_result = _make_eval_result(
+            outcome=EvalOutcome.NOT_DETECTED,
+            undetermined_operands=["side effects not reported"],
+        )
+        turn = _make_turn(eval_result=eval_result, turn_number=1)
+        result = _make_result(turns=[turn])
+        session = _make_session_with_results(
+            results_by_nodeid={"n": [result]},
+        )
+        payload = _serialize_session_results(session=session)
+        recovered = _deserialize_report_results(data=payload)
+        assert recovered["n"][0].turns[0].eval_result is not None
+        assert recovered["n"][0].turns[0].eval_result.undetermined_operands == [
+            "side effects not reported",
+        ]
+
+    def test_operands_with_mixed_whitespace_collapse_once_on_round_trip(self) -> None:
+        # The direct report and the xdist round trip must agree on the same
+        # reason set; padding must not survive as a separate entry.
+        eval_result = _make_eval_result(
+            outcome=EvalOutcome.NOT_DETECTED,
+            undetermined_operands=[" gap ", "gap", "other"],
+        )
+        turn = _make_turn(eval_result=eval_result, turn_number=1)
+        result = _make_result(turns=[turn])
+        session = _make_session_with_results(
+            results_by_nodeid={"n": [result]},
+        )
+        payload = _serialize_session_results(session=session)
+        recovered = _deserialize_report_results(data=payload)
+        recovered_eval = recovered["n"][0].turns[0].eval_result
+        assert recovered_eval is not None
+        assert recovered_eval.undetermined_operands == ["gap", "other"]
+
+    def test_a_sanitized_confidence_does_not_inflate_on_round_trip(self) -> None:
+        # A non-finite confidence serializes to null. The reader must not read
+        # that back as 1.0, or the same result would report maximum confidence
+        # through xdist while the direct JSON report shows null.
+        data = _serialize_eval_result(
+            eval_result=EvalResult(
+                outcome=EvalOutcome.DETECTED,
+                confidence=float("nan"),
+                rationale="r",
+            ),
+        )
+        assert data["confidence"] is None
+        recovered = _deserialize_eval_result(data=data)
+        assert recovered is not None
+        assert math.isnan(recovered.confidence)
+
+    def test_a_missing_confidence_still_defaults_to_full(self) -> None:
+        recovered = _deserialize_eval_result(data={"outcome": "detected"})
+        assert recovered is not None
+        assert recovered.confidence == pytest.approx(1.0)
+
+    def test_a_present_null_confidence_is_not_read_as_full(self) -> None:
+        recovered = _deserialize_eval_result(
+            data={"outcome": "detected", "confidence": None},
+        )
+        assert recovered is not None
+        assert math.isnan(recovered.confidence)
+
+    def test_a_bool_confidence_does_not_survive_as_a_number(self) -> None:
+        # bool is an int subclass; the serializer nulls it and the reader
+        # refuses to read it as 1.0/0.0, matching the judge's confidence parser.
+        data = _serialize_eval_result(
+            eval_result=EvalResult(
+                outcome=EvalOutcome.DETECTED,
+                confidence=True,
+                rationale="r",
+            ),
+        )
+        assert data["confidence"] is None
+        recovered = _deserialize_eval_result(
+            data={"outcome": "detected", "confidence": True},
+        )
+        assert recovered is not None
+        assert math.isnan(recovered.confidence)
+
+    def test_a_non_numeric_confidence_is_not_read_as_full(self) -> None:
+        recovered = _deserialize_eval_result(
+            data={"outcome": "detected", "confidence": "high"},
+        )
+        assert recovered is not None
+        assert math.isnan(recovered.confidence)
+
+
+class TestResultFieldSerializationRoundTrip:
     def test_datetime_round_trip(self) -> None:
         when = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
         turn = _make_turn(timestamp=when)
@@ -568,6 +711,68 @@ class TestDeserializationSecurity:
         }
         result = _deserialize_report_results(data=payload)["n"][0]
         assert result.turns[0].response.text == "DANGER"
+
+    def test_strips_ansi_from_undetermined_operands(self) -> None:
+        payload: dict[str, Any] = {
+            "schema": SCHEMA_VERSION,
+            "nodeid": "n",
+            "results": [
+                {
+                    "safe": True,
+                    "status": "safe",
+                    "summary": "x",
+                    "observability_level": "response_only",
+                    "turns": [
+                        {
+                            "request": {"prompt": "p"},
+                            "response": {"text": "t"},
+                            "eval_result": {
+                                "outcome": "not_detected",
+                                "undetermined_operands": [
+                                    "\x1b[31mDANGER\x1b[0m",
+                                ],
+                            },
+                        },
+                    ],
+                },
+            ],
+        }
+        result = _deserialize_report_results(data=payload)["n"][0]
+        assert result.turns[0].eval_result is not None
+        assert result.turns[0].eval_result.undetermined_operands == ["DANGER"]
+
+    def test_undetermined_operands_stay_distinct_after_stripping(self) -> None:
+        payload: dict[str, Any] = {
+            "schema": SCHEMA_VERSION,
+            "nodeid": "n",
+            "results": [
+                {
+                    "safe": True,
+                    "status": "safe",
+                    "summary": "x",
+                    "observability_level": "response_only",
+                    "turns": [
+                        {
+                            "request": {"prompt": "p"},
+                            "response": {"text": "t"},
+                            "eval_result": {
+                                "outcome": "not_detected",
+                                "undetermined_operands": [
+                                    "no side effects",
+                                    "\x1b[31mno side effects\x1b[0m",
+                                    "\x1b]0;title\x07",
+                                ],
+                            },
+                        },
+                    ],
+                },
+            ],
+        }
+        result = _deserialize_report_results(data=payload)["n"][0]
+        assert result.turns[0].eval_result is not None
+        assert result.turns[0].eval_result.undetermined_operands == [
+            "no side effects",
+        ]
 
     def test_nan_inf_in_duration_coerced_to_zero(self) -> None:
         session = _make_session_with_results(
@@ -1141,6 +1346,7 @@ class TestReportEnvelope:
                         summary="x" * 10_000,
                         harm_category="custom-risk",
                         metadata={"_pytest_test_name": "test_oversized"},
+                        observability_level=ObservabilityLevel.TOOL_ONLY,
                     ),
                 ],
             )
@@ -1157,6 +1363,7 @@ class TestReportEnvelope:
         assert session._results[1].metadata["_pytest_test_name"] == "test_oversized"
         assert session._results[1].metadata["_pytest_nodeid"] == "n"
         assert session._results[1].metadata["_rampart_transport_truncated"] is True
+        assert session._results[1].observability_level is ObservabilityLevel.TOOL_ONLY
         marker = payload["results"][1]
         assert len(json.dumps(marker).encode("utf-8")) <= MIN_RESULT_SIZE_LIMIT_BYTES
         assert marker["metadata"]["_rampart_limit_bytes"] == MIN_RESULT_SIZE_LIMIT_BYTES

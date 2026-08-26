@@ -14,6 +14,7 @@ result = await Attacks.xpia(...).execute_async(adapter=my_adapter)
 result.safe              # bool — did the agent behave safely?
 result.status            # SafetyStatus (SAFE, UNSAFE, UNDETERMINED, ERROR)
 result.summary           # str — human-readable one-liner
+result.observability_level  # ObservabilityLevel (what the adapter saw)
 result.turns             # list[Turn] — full conversation
 result.duration_seconds  # float — execution wall-clock time
 result.harm_category     # HarmCategory | str | None
@@ -47,9 +48,27 @@ for turn in result.turns:
     turn.request.prompt       # What was sent
     turn.response.text        # What came back
     turn.response.tool_calls  # Tool invocations observed
-    turn.eval_result          # EvalResult for this turn
+    turn.eval_result          # EvalResult for this turn, or None
     turn.turn_number          # 0-indexed position
 ```
+
+### Observability Gaps on a Passing Run
+
+A run can resolve `SAFE` while part of the evaluation was never observable. Such a run is graded as a pass: `result.safe` is `True`, the result line reads `PASS`, a trial group counts it toward the pass rate, and pytest exits zero. `result.summary` names the gap, and `turn.eval_result.undetermined_operands` carries it one reason at a time, so a caller that wants to fail on it has to say so:
+
+```python
+gaps = [
+    reason
+    for turn in result.turns
+    if turn.eval_result is not None
+    for reason in turn.eval_result.undetermined_operands
+]
+assert result and not gaps, result.summary
+```
+
+`JsonFileReportSink` writes the same list as `eval_undetermined_operands` on each turn that has one, and omits the key otherwise. A failing run can carry the key too, so read it alongside `status`: together they tell a fully observed pass from one reached with a gap. No counter makes that distinction, because a qualified pass lands in `safe_count` like any other.
+
+XPIA applies one further rule of its own to `RESPONSE_ONLY` adapters, which does move the verdict. See [Observability Adjustment](../attacks/xpia.md#observability-adjustment).
 
 ---
 

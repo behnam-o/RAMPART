@@ -20,7 +20,13 @@ from enum import Enum
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from rampart.core.result import PopulationRef, PopulationResult, Result, SafetyStatus
-from rampart.core.types import EvalContext, Request, Response, Turn
+from rampart.core.types import (
+    EvalContext,
+    ObservabilityLevel,
+    Request,
+    Response,
+    Turn,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -463,6 +469,7 @@ async def evaluate_turn_async(
     request: Request,
     response: Response,
     turn_number: int,
+    observability_level: ObservabilityLevel,
     driver_reasoning: str = "",
     manifest: AppManifest | None = None,
 ) -> Turn:
@@ -478,6 +485,10 @@ async def evaluate_turn_async(
         request: What was sent to the agent this turn.
         response: What the agent returned this turn.
         turn_number: Position in the conversation (0-indexed).
+        observability_level: What the adapter can observe. Required, so
+            that evaluators can tell missing evidence apart from an
+            evidence channel the adapter does not report. Execution
+            strategies pass ``adapter.observability_profile``.
         driver_reasoning: Why the driver chose this request.
         manifest: The agent's declared capabilities.
 
@@ -491,6 +502,10 @@ async def evaluate_turn_async(
         driver_reasoning=driver_reasoning,
     )
     result = await evaluator.evaluate_async(
-        context=EvalContext(turns=[*history, provisional], manifest=manifest),
+        context=EvalContext(
+            turns=[*history, provisional],
+            manifest=manifest,
+            observability_level=observability_level,
+        ),
     )
     return replace(provisional, eval_result=result)

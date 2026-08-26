@@ -140,7 +140,11 @@ class TestRampartSession:
         session = RampartSession()
         collector = ResultCollector()
         collector.record(
-            result=Result(status=SafetyStatus.SAFE, summary="ok"),
+            result=Result(
+                observability_level=ObservabilityLevel.RESPONSE_ONLY,
+                status=SafetyStatus.SAFE,
+                summary="ok",
+            ),
         )
         node = MagicMock()
         node.nodeid = "test_file.py::test_absorb"
@@ -156,7 +160,11 @@ class TestRampartSession:
         session = RampartSession()
         collector = ResultCollector()
         collector.record(
-            result=Result(status=SafetyStatus.SAFE, summary="ok"),
+            result=Result(
+                observability_level=ObservabilityLevel.RESPONSE_ONLY,
+                status=SafetyStatus.SAFE,
+                summary="ok",
+            ),
         )
         node = MagicMock()
         node.nodeid = "test_file.py::test_absorb[raw-id]"
@@ -176,13 +184,25 @@ class TestRampartSession:
 
         collector = ResultCollector()
         collector.record(
-            result=Result(status=SafetyStatus.SAFE, summary="s"),
+            result=Result(
+                observability_level=ObservabilityLevel.RESPONSE_ONLY,
+                status=SafetyStatus.SAFE,
+                summary="s",
+            ),
         )
         collector.record(
-            result=Result(status=SafetyStatus.UNSAFE, summary="u"),
+            result=Result(
+                observability_level=ObservabilityLevel.RESPONSE_ONLY,
+                status=SafetyStatus.UNSAFE,
+                summary="u",
+            ),
         )
         collector.record(
-            result=Result(status=SafetyStatus.ERROR, summary="e"),
+            result=Result(
+                observability_level=ObservabilityLevel.RESPONSE_ONLY,
+                status=SafetyStatus.ERROR,
+                summary="e",
+            ),
         )
         node = MagicMock()
         node.nodeid = "test_file.py::test_counts"
@@ -211,6 +231,7 @@ class TestRampartSession:
             collector = ResultCollector()
             collector.record(
                 result=Result(
+                    observability_level=ObservabilityLevel.RESPONSE_ONLY,
                     status=statuses[idx],
                     summary=f"trial-{idx}",
                 ),
@@ -244,6 +265,7 @@ class TestRampartSession:
             collector = ResultCollector()
             collector.record(
                 result=Result(
+                    observability_level=ObservabilityLevel.RESPONSE_ONLY,
                     status=SafetyStatus.ERROR,
                     summary=f"err-{idx}",
                 ),
@@ -278,6 +300,7 @@ class TestRampartSession:
             collector = ResultCollector()
             collector.record(
                 result=Result(
+                    observability_level=ObservabilityLevel.RESPONSE_ONLY,
                     status=statuses[idx],
                     summary=f"trial-{idx}",
                 ),
@@ -306,6 +329,7 @@ class TestRampartSession:
             collector = ResultCollector()
             collector.record(
                 result=Result(
+                    observability_level=ObservabilityLevel.RESPONSE_ONLY,
                     status=SafetyStatus.SAFE,
                     summary=f"trial-{idx}",
                 ),
@@ -561,6 +585,7 @@ class TestWriteResultLine:
     def test_ansi_stripped_from_summary(self) -> None:
         reporter = MagicMock()
         result = Result(
+            observability_level=ObservabilityLevel.RESPONSE_ONLY,
             status=SafetyStatus.SAFE,
             summary="\x1b[31mevil\x1b[0m",
         )
@@ -582,6 +607,7 @@ class TestTerminalSummary:
         collector = ResultCollector()
         collector.record(
             result=Result(
+                observability_level=ObservabilityLevel.RESPONSE_ONLY,
                 status=SafetyStatus.SAFE,
                 summary="safe-one",
                 harm_category="data_exfiltration",
@@ -589,6 +615,7 @@ class TestTerminalSummary:
         )
         collector.record(
             result=Result(
+                observability_level=ObservabilityLevel.RESPONSE_ONLY,
                 status=SafetyStatus.UNSAFE,
                 summary="unsafe-one",
                 harm_category="jailbreak",
@@ -747,7 +774,11 @@ class TestRampartSessionDuration:
         session = RampartSession()
         collector = ResultCollector()
         collector.record(
-            result=Result(status=SafetyStatus.SAFE, summary="ok"),
+            result=Result(
+                observability_level=ObservabilityLevel.RESPONSE_ONLY,
+                status=SafetyStatus.SAFE,
+                summary="ok",
+            ),
         )
         node = MagicMock()
         node.nodeid = "test.py::test_dur"
@@ -759,7 +790,11 @@ class TestRampartSessionDuration:
         session = RampartSession()
         collector = ResultCollector()
         collector.record(
-            result=Result(status=SafetyStatus.SAFE, summary="ok"),
+            result=Result(
+                observability_level=ObservabilityLevel.RESPONSE_ONLY,
+                status=SafetyStatus.SAFE,
+                summary="ok",
+            ),
         )
         node = MagicMock()
         node.nodeid = "test.py::test_dur"
@@ -781,6 +816,7 @@ class TestTrialGroupRendering:
             status = SafetyStatus.UNSAFE if idx < 2 else SafetyStatus.SAFE
             collector.record(
                 result=Result(
+                    observability_level=ObservabilityLevel.RESPONSE_ONLY,
                     status=status,
                     summary=f"t-{idx}",
                 ),
@@ -813,6 +849,7 @@ class TestTrialGroupRendering:
             collector = ResultCollector()
             collector.record(
                 result=Result(
+                    observability_level=ObservabilityLevel.RESPONSE_ONLY,
                     status=SafetyStatus.SAFE,
                     summary=f"t-{idx}",
                 ),
@@ -859,6 +896,7 @@ class TestEvaluateGates:
             status = SafetyStatus.UNSAFE if idx < 2 else SafetyStatus.SAFE
             collector.record(
                 result=Result(
+                    observability_level=ObservabilityLevel.RESPONSE_ONLY,
                     status=status,
                     summary=f"t-{idx}",
                 ),
@@ -888,7 +926,11 @@ class TestEmitSinks:
         session = RampartSession(sinks=[mock_sink])
         collector = ResultCollector()
         collector.record(
-            result=Result(status=SafetyStatus.SAFE, summary="ok"),
+            result=Result(
+                observability_level=ObservabilityLevel.RESPONSE_ONLY,
+                status=SafetyStatus.SAFE,
+                summary="ok",
+            ),
         )
         node = MagicMock()
         node.nodeid = "test.py::test_sink"
@@ -1006,7 +1048,11 @@ class TestIncompleteExitStatus:
 
 def _make_result(*, summary: str = "result") -> Result:
     """Build a minimal Result for makereport tests."""
-    return Result(status=SafetyStatus.SAFE, summary=summary)
+    return Result(
+        observability_level=ObservabilityLevel.RESPONSE_ONLY,
+        status=SafetyStatus.SAFE,
+        summary=summary,
+    )
 
 
 def _make_reporting_item(*, worker: bool = True) -> Any:

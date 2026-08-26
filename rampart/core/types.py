@@ -24,14 +24,38 @@ if TYPE_CHECKING:
 class ObservabilityLevel(Enum):
     """What the adapter can reliably observe during agent execution.
 
-    Declared by the adapter to inform evaluators and reporting. When
-    the adapter declares RESPONSE_ONLY, evaluators that require tool
-    call data return UNDETERMINED rather than a false SAFE.
+    Declared by the adapter to inform evaluators and reporting. An
+    evaluator that needs an evidence channel the adapter does not report
+    returns UNDETERMINED rather than a false NOT_DETECTED. That covers
+    tool call data under RESPONSE_ONLY, and side effect data under
+    either TOOL_ONLY or RESPONSE_ONLY.
+
+    The guarantee is per channel, not per field. A level that reports a
+    channel is taken at its word for what it puts in it, so a tool call
+    reported with redacted or partial arguments still counts as observed
+    and a predicate over those arguments can return NOT_DETECTED.
+
+    The ``observes_tool_calls`` and ``observes_side_effects`` properties
+    let evaluators ask what evidence is available without listing every
+    enum member.
     """
 
     TOOL_AND_SIDE_EFFECTS = "tool_and_side_effects"
     TOOL_ONLY = "tool_only"
     RESPONSE_ONLY = "response_only"
+
+    @property
+    def observes_tool_calls(self) -> bool:
+        """True if the adapter reports tool invocations."""
+        return self in {
+            ObservabilityLevel.TOOL_AND_SIDE_EFFECTS,
+            ObservabilityLevel.TOOL_ONLY,
+        }
+
+    @property
+    def observes_side_effects(self) -> bool:
+        """True if the adapter reports side effects."""
+        return self is ObservabilityLevel.TOOL_AND_SIDE_EFFECTS
 
 
 class PayloadFormat(Enum):
@@ -290,12 +314,25 @@ class EvalResult:
         confidence: How confident the evaluator is (0.0 to 1.0).
         evidence: Specific observations supporting the outcome.
         rationale: Human-readable explanation.
+        undetermined_operands: Why parts of the evaluation stayed
+            undetermined, one distinct reason per entry. ``&`` and ``|``
+            record every operand they ran that came back UNDETERMINED,
+            taking the reasons that operand already carries or, for a
+            leaf, its rationale, or a fixed phrase when it gave none;
+            repeats are collapsed. ``~`` carries its inner result's
+            entries through. An evaluator that is not a composite
+            records nothing. It says nothing about ``outcome``: a
+            DETECTED or NOT_DETECTED result with entries here reached a
+            definitive answer while part of the evaluation did not, and
+            an UNDETERMINED result can carry entries recorded further
+            down the expression.
     """
 
     outcome: EvalOutcome
     confidence: float = 1.0
     evidence: list[str] = field(default_factory=list[str])
     rationale: str = ""
+    undetermined_operands: list[str] = field(default_factory=list[str])
 
     @property
     def detected(self) -> bool:
@@ -318,11 +355,20 @@ class EvalContext:
     Args:
         turns: All turns in the interaction, in chronological order.
             Includes the turn being evaluated as the last element.
+        observability_level: What the adapter declared it can observe.
+            Evaluators check this before treating missing evidence as
+            evidence of absence. Required, because no value is a truthful
+            guess: assuming full observability turns an unobservable
+            channel into a clean bill of health, and assuming the
+            narrowest level makes an evaluator give up on evidence the
+            adapter would have reported. Pass the adapter's declared
+            level, normally ``adapter.observability_profile``.
         manifest: The agent's declared capabilities, if available.
         metadata: Additional context from the test setup.
     """
 
     turns: list[Turn]
+    observability_level: ObservabilityLevel
     manifest: AppManifest | None = None
     metadata: dict[str, Any] = field(default_factory=dict[str, Any])
 
@@ -358,6 +404,7 @@ class EvalContext:
         cls,
         *,
         response: Response,
+        observability_level: ObservabilityLevel,
         prompt: str = "",
         manifest: AppManifest | None = None,
     ) -> EvalContext:
@@ -367,6 +414,9 @@ class EvalContext:
 
         Args:
             response: The agent response to evaluate.
+            observability_level: What the adapter that produced this
+                response can observe. Required, for the reason given on
+                the field itself.
             prompt: The prompt that produced this response.
             manifest: Optional agent manifest.
 
@@ -376,4 +426,5 @@ class EvalContext:
         return cls(
             turns=[Turn(request=Request(prompt=prompt), response=response)],
             manifest=manifest,
+            observability_level=observability_level,
         )

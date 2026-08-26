@@ -75,7 +75,11 @@ class _SuccessExecution(BaseExecution):
 
     async def _execute_async(self, *, adapter: AgentAdapter) -> Result:
         """Return a safe result."""
-        return Result(status=SafetyStatus.SAFE, summary="ok")
+        return Result(
+            observability_level=ObservabilityLevel.RESPONSE_ONLY,
+            status=SafetyStatus.SAFE,
+            summary="ok",
+        )
 
 
 class _ConcurrencyTracker:
@@ -111,7 +115,11 @@ class _ConcurrencyTrackingExecution(BaseExecution):
             self.tracker._release.set()
         await self.tracker._release.wait()
         self.tracker.active_count -= 1
-        return Result(status=SafetyStatus.SAFE, summary="ok")
+        return Result(
+            observability_level=adapter.observability_profile,
+            status=SafetyStatus.SAFE,
+            summary="ok",
+        )
 
 
 class _InfraErrorExecution(BaseExecution):
@@ -595,6 +603,20 @@ class TestDriverErrorHandling:
 
 
 class TestEvaluateTurnAsync:
+    async def test_observability_level_is_required_async(self) -> None:
+        from unittest.mock import AsyncMock
+
+        from rampart.core.execution import evaluate_turn_async
+
+        with pytest.raises(TypeError, match="observability_level"):
+            await evaluate_turn_async(  # ty: ignore[missing-argument]
+                evaluator=AsyncMock(),
+                history=[],
+                request=Request(prompt="hello"),
+                response=Response(text="world"),
+                turn_number=0,
+            )
+
     async def test_returns_turn_with_eval_result_async(self) -> None:
         from unittest.mock import AsyncMock
 
@@ -612,6 +634,7 @@ class TestEvaluateTurnAsync:
         )
 
         turn = await evaluate_turn_async(
+            observability_level=ObservabilityLevel.TOOL_AND_SIDE_EFFECTS,
             evaluator=evaluator,
             history=[],
             request=Request(prompt="hello"),
@@ -652,6 +675,7 @@ class TestEvaluateTurnAsync:
         )
 
         await evaluate_turn_async(
+            observability_level=ObservabilityLevel.TOOL_AND_SIDE_EFFECTS,
             evaluator=evaluator,
             history=[history_turn],
             request=Request(prompt="current"),
@@ -665,6 +689,34 @@ class TestEvaluateTurnAsync:
         assert captured_context.turns[0].request.prompt == "prev"
         assert captured_context.turns[1].request.prompt == "current"
 
+    async def test_passes_observability_level_to_context_async(self) -> None:
+        from unittest.mock import AsyncMock
+
+        from rampart.core.execution import evaluate_turn_async
+        from rampart.core.types import EvalOutcome, Request, Response
+
+        captured_context = None
+
+        def capture_eval(*, context: EvalContext) -> EvalResult:
+            nonlocal captured_context
+            captured_context = context
+            return EvalResult(outcome=EvalOutcome.NOT_DETECTED)
+
+        evaluator = AsyncMock()
+        evaluator.evaluate_async.side_effect = capture_eval
+
+        await evaluate_turn_async(
+            evaluator=evaluator,
+            history=[],
+            request=Request(prompt="hello"),
+            response=Response(text="world"),
+            turn_number=0,
+            observability_level=ObservabilityLevel.RESPONSE_ONLY,
+        )
+
+        assert captured_context is not None
+        assert captured_context.observability_level is ObservabilityLevel.RESPONSE_ONLY
+
     async def test_preserves_driver_reasoning_async(self) -> None:
         from unittest.mock import AsyncMock
 
@@ -675,6 +727,7 @@ class TestEvaluateTurnAsync:
         evaluator.evaluate_async.return_value = EvalResult(outcome=EvalOutcome.DETECTED)
 
         turn = await evaluate_turn_async(
+            observability_level=ObservabilityLevel.TOOL_AND_SIDE_EFFECTS,
             evaluator=evaluator,
             history=[],
             request=Request(prompt="p"),
