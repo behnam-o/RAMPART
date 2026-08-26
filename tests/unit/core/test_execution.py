@@ -82,39 +82,24 @@ class _SuccessExecution(BaseExecution):
         )
 
 
-class _ConcurrencyTracker:
-    """Shared observer of trial concurrency."""
+class _OrderingExecution(BaseExecution):
+    """Execution that records when each trial starts and finishes."""
 
-    def __init__(self, *, expected_concurrency: int) -> None:
-        self.active_count = 0
-        self.max_active_count = 0
-        self.expected_concurrency = expected_concurrency
-        self._release = asyncio.Event()
-
-
-class _ConcurrencyTrackingExecution(BaseExecution):
-    """Execution that records the number of overlapping trials."""
-
-    def __init__(self, *, tracker: _ConcurrencyTracker) -> None:
+    def __init__(self, *, index: int, events: list[str]) -> None:
         super().__init__()
-        self.tracker = tracker
+        self.index = index
+        self.events = events
 
     @property
     def strategy_name(self) -> str:
         """Test strategy name."""
-        return "concurrency_tracking"
+        return "ordering"
 
     async def _execute_async(self, *, adapter: AgentAdapter) -> Result:
-        """Wait until the expected number of trials overlap."""
-        self.tracker.active_count += 1
-        self.tracker.max_active_count = max(
-            self.tracker.max_active_count,
-            self.tracker.active_count,
-        )
-        if self.tracker.active_count == self.tracker.expected_concurrency:
-            self.tracker._release.set()
-        await self.tracker._release.wait()
-        self.tracker.active_count -= 1
+        """Record trial boundaries around an async scheduling point."""
+        self.events.append(f"start-{self.index}")
+        await asyncio.sleep(0)
+        self.events.append(f"finish-{self.index}")
         return Result(
             observability_level=adapter.observability_profile,
             status=SafetyStatus.SAFE,
@@ -252,23 +237,28 @@ class TestExecuteTrials:
             ExecutionEvent.ON_POST_EXECUTE,
         ] * 3
 
-    async def test_runs_trials_with_opt_in_bounded_concurrency_async(self) -> None:
-        tracker = _ConcurrencyTracker(expected_concurrency=2)
+    async def test_runs_trials_sequentially_async(self) -> None:
+        events: list[str] = []
+
+        def create_execution() -> BaseExecution:
+            return _OrderingExecution(index=len(events) // 2, events=events)
 
         population = await execute_trials_async(
-            execution_factory=lambda: _ConcurrencyTrackingExecution(
-                tracker=tracker,
-            ),
+            execution_factory=create_execution,
             adapter=_StubAdapter(),
-            n=4,
+            n=3,
             threshold=1.0,
-            max_concurrency=2,
         )
 
-        assert tracker.max_active_count == 2
-        refs = [result.population for result in population.results]
-        assert all(ref is not None for ref in refs)
-        assert [ref.index for ref in refs if ref is not None] == [0, 1, 2, 3]
+        assert events == [
+            "start-0",
+            "finish-0",
+            "start-1",
+            "finish-1",
+            "start-2",
+            "finish-2",
+        ]
+        assert population.executed_count == 3
 
     async def test_attaches_population_ref_before_post_execute_async(self) -> None:
         handler = _RecordingHandler()
@@ -368,33 +358,6 @@ class TestExecuteTrials:
             )
 
         assert handler.events == []
-
-    @pytest.mark.parametrize("max_concurrency", [True, 1.5, "2"])
-    async def test_rejects_invalid_max_concurrency_type_async(
-        self,
-        max_concurrency: object,
-    ) -> None:
-        with pytest.raises(
-            TypeError,
-            match="max_concurrency must be a non-boolean integer",
-        ):
-            await execute_trials_async(
-                execution_factory=_SuccessExecution,
-                adapter=_StubAdapter(),
-                n=3,
-                threshold=0.8,
-                max_concurrency=max_concurrency,  # ty: ignore[invalid-argument-type]
-            )
-
-    async def test_rejects_non_positive_max_concurrency_async(self) -> None:
-        with pytest.raises(ValueError, match="max_concurrency must be greater"):
-            await execute_trials_async(
-                execution_factory=_SuccessExecution,
-                adapter=_StubAdapter(),
-                n=3,
-                threshold=0.8,
-                max_concurrency=0,
-            )
 
 
 class TestPopulationPublicExports:
