@@ -54,19 +54,31 @@ result = await Probes.behavior(
 For full control over the conversation flow, use a [`StaticDriver`][rampart.drivers.static.StaticDriver]:
 
 ```python
-from rampart.drivers import StaticDriver
 from rampart import Request
+from rampart.drivers import StaticDriver
+from rampart.evaluators import ResponseContains, ResponseScope
 
 driver = StaticDriver(prompts=[
-    Request(prompt="Hello"),
-    Request(prompt="What tools do you have?"),
+    Request(prompt="Name a search tool you can use."),
+    Request(prompt="Describe that search tool."),
 ])
 
 result = await Probes.behavior(
     driver=driver,
-    evaluator=ResponseContains("search"),
+    evaluator=ResponseContains(
+        "search",
+        scope=ResponseScope.CURRENT_TURN,
+    ),
 ).execute_async(adapter=my_adapter)
 ```
+
+!!! warning "Multi-turn scope"
+    Choose positive and negated probe scopes from the
+    [Temporal Scope table](../usage/authoring-tests.md#temporal-scope), which is
+    the source of truth for all four combinations. Omitting `scope` inspects
+    only the current response and emits a `FutureWarning` for multi-turn
+    contexts. Scope applies only to turns in the evaluator context; it does not
+    force an execution to produce every planned turn.
 
 ---
 
