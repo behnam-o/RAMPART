@@ -10,13 +10,18 @@ from importlib import import_module
 from typing import TYPE_CHECKING
 
 from rampart.core.adapter import AgentAdapter, Session
-from rampart.core.errors import DriverError, EvaluatorError, InfrastructureError
+from rampart.core.errors import (
+    DriverError,
+    EvaluatorError,
+    InfrastructureError,
+)
 from rampart.core.evaluator import BaseEvaluator, Evaluator
 from rampart.core.execution import (
     BaseExecution,
     ExecutionEvent,
     ExecutionEventData,
     ExecutionEventHandler,
+    execute_trials_async,
 )
 from rampart.core.injection import InjectionHandle, Surface
 from rampart.core.manifest import AppManifest, DataSource, ToolDeclaration
@@ -25,6 +30,8 @@ from rampart.core.prompt_driver import PromptDecision, PromptDriver
 from rampart.core.result import (
     HarmCategory,
     InjectionRecord,
+    PopulationRef,
+    PopulationResult,
     Result,
     SafetyStatus,
     resolve_as_attack,
@@ -85,6 +92,8 @@ __all__ = [
     "Payload",
     "PayloadFormat",
     "Persona",
+    "PopulationRef",
+    "PopulationResult",
     "Probes",
     "PromptDecision",
     "PromptDriver",
@@ -99,6 +108,7 @@ __all__ = [
     "ToolDeclaration",
     "TranscriptScope",
     "Turn",
+    "execute_trials_async",
     "record_result",
     "resolve_as_attack",
     "resolve_as_probe",

@@ -28,6 +28,7 @@ from rampart.common.text import strip_ansi as _strip_ansi_impl
 from rampart.core.result import (
     HarmCategory,
     InjectionRecord,
+    PopulationRef,
     Result,
     SafetyStatus,
 )
@@ -494,6 +495,16 @@ def _serialize_result(*, result: Result, nodeid: str) -> dict[str, Any]:
         "injections": [
             _serialize_injection_record(injection=i) for i in result.injections
         ],
+        "population": (
+            {
+                "id": result.population.id,
+                "index": result.population.index,
+                "size": result.population.size,
+                "threshold": result.population.threshold,
+            }
+            if result.population is not None
+            else None
+        ),
         "metadata": _sanitize_metadata(
             metadata=result.metadata,
             nodeid=nodeid,
@@ -1146,6 +1157,53 @@ def _deserialize_injection_record(*, data: object) -> InjectionRecord:
     )
 
 
+def _deserialize_population_ref(*, data: object) -> PopulationRef | None:
+    """Deserialize and validate an optional PopulationRef.
+
+    Args:
+        data (object): Serialized population data, or None.
+
+    Returns:
+        PopulationRef | None: The deserialized population reference.
+
+    Raises:
+        WorkerOutputError: If a population field has an invalid type.
+    """
+    if data is None:
+        return None
+    if not isinstance(data, dict):
+        msg = f"Expected dict for population, got {type(data).__name__}."
+        raise WorkerOutputError(msg)
+    typed = cast("dict[str, Any]", data)
+    population_id = typed.get("id")
+    index = typed.get("index")
+    size = typed.get("size")
+    threshold = typed.get("threshold")
+    if not isinstance(population_id, str):
+        msg = f"Expected string for population id, got {type(population_id).__name__}."
+        raise WorkerOutputError(msg)
+    if type(index) is not int:
+        msg = f"Expected integer for population index, got {type(index).__name__}."
+        raise WorkerOutputError(msg)
+    if type(size) is not int:
+        msg = f"Expected integer for population size, got {type(size).__name__}."
+        raise WorkerOutputError(msg)
+    if isinstance(threshold, bool) or not isinstance(threshold, int | float):
+        msg = (
+            f"Expected number for population threshold, got {type(threshold).__name__}."
+        )
+        raise WorkerOutputError(msg)
+    if not math.isfinite(threshold):
+        msg = f"Expected finite number for population threshold, got {threshold!r}."
+        raise WorkerOutputError(msg)
+    return PopulationRef(
+        id=population_id,
+        index=index,
+        size=size,
+        threshold=float(threshold),
+    )
+
+
 def _deserialize_result(*, data: object) -> Result:
     """Deserialize a Result.
 
@@ -1161,6 +1219,7 @@ def _deserialize_result(*, data: object) -> Result:
     typed = cast("dict[str, Any]", data)
     raw_turns = typed.get("turns", [])
     raw_injections = typed.get("injections", [])
+    raw_population = typed.get("population")
     raw_metadata = typed.get("metadata", {})
     metadata = _sanitize(
         value=raw_metadata if isinstance(raw_metadata, dict) else {},
@@ -1192,6 +1251,7 @@ def _deserialize_result(*, data: object) -> Result:
                 raw_injections if isinstance(raw_injections, list) else [],
             )
         ],
+        population=_deserialize_population_ref(data=raw_population),
         metadata=cast("dict[str, Any]", metadata),
     )
 

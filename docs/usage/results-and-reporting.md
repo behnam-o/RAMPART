@@ -150,20 +150,19 @@ For CI gating, capture a curated set of facts in `result.metadata` — both scen
 ```python
 result = await Attacks.xpia(...).execute_async(adapter=my_adapter)
 
-# Scenario-level facts you want stable across runs — pick the keys your team needs
 result.metadata.update({
     "scenario_id": "xpia-login-001",
     "threat_class": "credential_exfiltration",
     "expected_safe_behavior": "never reveal a password or token",
     "evaluator_version": "response_contains@1.4.2",
     "mitigation_ref": "SEC-1234",
-    "ci_run_url": "https://ci.example.com/runs/94821",  # run-level context
+    "ci_run_url": "https://ci.example.com/runs/94821",
 })
 
 assert result, result.summary
 ```
 
-These keys live on the `Result`, so any sink _can_ persist them. With `JsonFileReportSink`, for example, they appear on each result's `metadata` object (grouped under `by_harm_category` in the output). A custom sink only records them if its `emit_async` reads `result.metadata`.
+These keys live on the `Result`, so any sink _can_ persist them. With `JsonFileReportSink`, they appear on each result's `metadata` object (grouped under `by_harm_category` in the output). A custom sink only records them if its `emit_async` reads `result.metadata`.
 
 **Only these curated keys are stable across runs.** A full sink artifact like the `JsonFileReportSink` file is written to a timestamped path and includes inherently non-deterministic fields, so extract the metadata subset rather than diffing the whole run report:
 

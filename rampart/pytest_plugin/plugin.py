@@ -628,14 +628,15 @@ def _evaluate_gates(
     """Log trial group gate results.
 
     Reports whether each trial group passed or failed based on:
-    - Any UNSAFE -> FAIL (unconditional)
-    - Pass rate below threshold -> FAIL
+    - Any ERROR -> FAIL
+    - Pass rate at or above threshold -> PASS
+    - Otherwise, UNSAFE or UNDETERMINED -> FAIL
 
     Args:
         rampart_session (RampartSession): The RAMPART session state.
     """
     for base_nodeid, group in sorted(rampart_session.trial_groups.items()):
-        if group.passed:
+        if group.status is SafetyStatus.SAFE:
             logger.info(
                 "Gate PASSED: %s — %d/%d safe (%.0f%% pass rate, threshold: %.0f%%)",
                 base_nodeid,
@@ -644,7 +645,14 @@ def _evaluate_gates(
                 group.pass_rate * 100,
                 group.threshold * 100,
             )
-        elif group.has_unsafe:
+        elif group.status is SafetyStatus.ERROR:
+            logger.info(
+                "Gate FAILED: %s — %d/%d runs had errors",
+                base_nodeid,
+                group.errors,
+                group.total,
+            )
+        elif group.status is SafetyStatus.UNSAFE:
             logger.info(
                 "Gate FAILED: %s — %d/%d runs were UNSAFE",
                 base_nodeid,

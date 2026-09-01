@@ -12,12 +12,13 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from rampart.core.result import Result, SafetyStatus
+from rampart.core.result import PopulationRef, PopulationResult, Result, SafetyStatus
 from rampart.core.types import (
     EvalContext,
     ObservabilityLevel,
@@ -27,6 +28,8 @@ from rampart.core.types import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from rampart.core.adapter import AgentAdapter
     from rampart.core.evaluator import Evaluator
     from rampart.core.manifest import AppManifest
@@ -220,7 +223,11 @@ class BaseExecution(ABC):
         """
         ...
 
-    async def execute_async(self, *, adapter: AgentAdapter) -> Result:
+    async def execute_async(
+        self,
+        *,
+        adapter: AgentAdapter,
+    ) -> Result:
         """Execute the safety test.
 
         Fires lifecycle events and delegates to _execute_async for
@@ -235,6 +242,34 @@ class BaseExecution(ABC):
 
         Returns:
             Result: Safety verdict with evidence and diagnostics.
+        """
+        return await self._execute_once_async(
+            adapter=adapter,
+            population=None,
+        )
+
+    @abstractmethod
+    async def _execute_async(self, *, adapter: AgentAdapter) -> Result:
+        """Core execution logic implemented by each strategy.
+
+        Args:
+            adapter (AgentAdapter): The agent to test.
+
+        Returns:
+            Result: Safety verdict.
+        """
+        ...
+
+    async def _execute_once_async(
+        self,
+        *,
+        adapter: AgentAdapter,
+        population: PopulationRef | None,
+    ) -> Result:
+        """Run one execution lifecycle with optional population provenance.
+
+        Returns:
+            Result: The execution result after lifecycle processing.
         """
         start = time.monotonic()
         await self._fire_async(
@@ -270,6 +305,7 @@ class BaseExecution(ABC):
 
         elapsed = time.monotonic() - start
         result.duration_seconds = elapsed
+        result.population = population
         await self._fire_async(
             ExecutionEvent.ON_POST_EXECUTE,
             adapter=adapter,
@@ -277,18 +313,6 @@ class BaseExecution(ABC):
             result=result,
         )
         return result
-
-    @abstractmethod
-    async def _execute_async(self, *, adapter: AgentAdapter) -> Result:
-        """Core execution logic implemented by each strategy.
-
-        Args:
-            adapter (AgentAdapter): The agent to test.
-
-        Returns:
-            Result: Safety verdict.
-        """
-        ...
 
     async def _fire_async(
         self,
@@ -328,6 +352,77 @@ class BaseExecution(ABC):
                     event.value,
                     exc_info=True,
                 )
+
+
+async def execute_trials_async(
+    *,
+    execution_factory: Callable[[], BaseExecution],
+    adapter: AgentAdapter,
+    n: int,
+    threshold: float,
+) -> PopulationResult:
+    """Execute trials sequentially using a fresh execution from the factory.
+
+    Args:
+        execution_factory (Callable[[], BaseExecution]): Creates one complete
+            execution, including trial-scoped dependencies, per trial.
+        adapter (AgentAdapter): The agent to test.
+        n (int): Number of independent trials to execute.
+        threshold (float): Required safe-result rate from 0.0 to 1.0.
+
+    Returns:
+        PopulationResult: Aggregate verdict and individual trial results.
+
+    Raises:
+        TypeError: If n is not a non-boolean integer.
+        ValueError: If n is less than 1 or threshold is outside [0.0, 1.0].
+    """
+    _validate_trial_parameters(
+        n=n,
+        threshold=threshold,
+    )
+    population_id = uuid.uuid4().hex
+    results: list[Result] = []
+    for index in range(n):
+        execution = execution_factory()
+        results.append(
+            await BaseExecution._execute_once_async(  # ruff: ignore[private-member-access]
+                execution,
+                adapter=adapter,
+                population=PopulationRef(
+                    id=population_id,
+                    index=index,
+                    size=n,
+                    threshold=threshold,
+                ),
+            )
+        )
+    return PopulationResult(
+        results=results,
+        threshold=threshold,
+    )
+
+
+def _validate_trial_parameters(
+    *,
+    n: int,
+    threshold: float,
+) -> None:
+    """Validate trial population parameters.
+
+    Raises:
+        TypeError: If n is not a non-boolean integer.
+        ValueError: If n is less than 1 or threshold is outside [0.0, 1.0].
+    """
+    if not isinstance(n, int) or isinstance(n, bool):
+        msg = "n must be a non-boolean integer"
+        raise TypeError(msg)
+    if n < 1:
+        msg = "n must be greater than or equal to 1"
+        raise ValueError(msg)
+    if not 0.0 <= threshold <= 1.0:
+        msg = "threshold must be between 0.0 and 1.0"
+        raise ValueError(msg)
 
 
 async def evaluate_turn_async(

@@ -17,6 +17,7 @@ import pytest
 from rampart.core.result import (
     HarmCategory,
     InjectionRecord,
+    PopulationRef,
     Result,
     SafetyStatus,
 )
@@ -72,6 +73,7 @@ def _make_result(
     metadata: dict[str, Any] | None = None,
     turns: list[Turn] | None = None,
     injections: list[InjectionRecord] | None = None,
+    population: PopulationRef | None = None,
     observability_level: ObservabilityLevel = ObservabilityLevel.RESPONSE_ONLY,
 ) -> Result:
     return Result(
@@ -83,6 +85,7 @@ def _make_result(
         strategy=strategy,
         observability_level=observability_level,
         injections=injections or [],
+        population=population,
         metadata=metadata or {},
     )
 
@@ -489,6 +492,8 @@ class TestSerializationRoundTrip:
         assert recovered is not None
         assert math.isnan(recovered.confidence)
 
+
+class TestResultFieldSerializationRoundTrip:
     def test_datetime_round_trip(self) -> None:
         when = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
         turn = _make_turn(timestamp=when)
@@ -510,6 +515,18 @@ class TestSerializationRoundTrip:
         recovered = _deserialize_report_results(data=payload)
         assert recovered["n"][0].injections[0].payload_id == "p1"
         assert recovered["n"][0].injections[0].surface_name == "OneDrive"
+
+    def test_population_ref_round_trip(self) -> None:
+        population = PopulationRef(id="population-1", index=2, size=5, threshold=0.8)
+        result = _make_result(population=population)
+        session = _make_session_with_results(
+            results_by_nodeid={"n": [result]},
+        )
+
+        payload = _serialize_session_results(session=session)
+        recovered = _deserialize_report_results(data=payload)
+
+        assert recovered["n"][0].population == population
 
     def test_response_with_tool_calls_round_trip(self) -> None:
         tool_call = ToolCall(name="send_email", arguments={"to": "a@b.c"})
@@ -614,6 +631,43 @@ class TestDeserializationValidation:
             ],
         }
         with pytest.raises(WorkerOutputError, match="Unknown ObservabilityLevel"):
+            deserialize_report_data(data=payload, report_nodeid="n")
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("id", None),
+            ("index", "bad"),
+            ("size", []),
+            ("threshold", "bad"),
+        ],
+    )
+    def test_rejects_malformed_population_field(
+        self,
+        field: str,
+        value: object,
+    ) -> None:
+        population: dict[str, object] = {
+            "id": "population-1",
+            "index": 0,
+            "size": 1,
+            "threshold": 0.8,
+        }
+        population[field] = value
+        payload: dict[str, Any] = {
+            "schema": SCHEMA_VERSION,
+            "nodeid": "n",
+            "results": [
+                {
+                    "status": "safe",
+                    "summary": "x",
+                    "observability_level": "response_only",
+                    "population": population,
+                },
+            ],
+        }
+
+        with pytest.raises(WorkerOutputError, match=f"population {field}"):
             deserialize_report_data(data=payload, report_nodeid="n")
 
 

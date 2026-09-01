@@ -25,6 +25,8 @@ Data types shared across the entire framework. All importable from `rampart` dir
     options:
       members:
         - Result
+        - PopulationRef
+        - PopulationResult
         - SafetyStatus
         - HarmCategory
         - InjectionRecord

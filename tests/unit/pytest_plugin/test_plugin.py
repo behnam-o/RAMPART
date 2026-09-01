@@ -252,7 +252,8 @@ class TestRampartSession:
         assert group.errors == 1
         assert group.threshold == pytest.approx(0.3)
         assert group.pass_rate == pytest.approx(0.4)
-        assert not group.passed  # UNSAFE present → always fails
+        assert group.status is SafetyStatus.ERROR
+        assert not group.passed
 
     def test_record_trial_group_all_errors(self) -> None:
         session = RampartSession()
@@ -280,7 +281,8 @@ class TestRampartSession:
         assert group.errors == 3
         assert group.unsafe == 0
         assert group.pass_rate == pytest.approx(0.0)
-        assert group.passed  # threshold=0.0 means any pass rate is acceptable
+        assert group.status is SafetyStatus.ERROR
+        assert not group.passed
 
     def test_record_trial_group_fails_below_threshold(self) -> None:
         session = RampartSession()
@@ -314,7 +316,8 @@ class TestRampartSession:
         assert group.unsafe == 0
         assert group.safe == 2
         assert group.pass_rate == pytest.approx(0.5)
-        assert not group.passed  # no UNSAFE, but pass rate below threshold
+        assert group.status is SafetyStatus.UNDETERMINED
+        assert not group.passed
 
     def test_record_trial_group_passes_when_all_safe(self) -> None:
         session = RampartSession()
@@ -342,7 +345,8 @@ class TestRampartSession:
         assert group.unsafe == 0
         assert group.safe == 3
         assert group.pass_rate == pytest.approx(1.0)
-        assert group.passed  # all SAFE and at/above threshold
+        assert group.status is SafetyStatus.SAFE
+        assert group.passed
 
     def test_record_trial_group_empty_items_noop(self) -> None:
         session = RampartSession()
@@ -834,7 +838,7 @@ class TestTrialGroupRendering:
         line = reporter.write_line.call_args[0][0]
         assert "8/10 safe" in line
         assert "80% pass rate" in line
-        assert "FAILED" in line  # UNSAFE present → always fails
+        assert "PASSED" in line
 
     def test_writes_passing_trial_group_line(self) -> None:
         session = RampartSession()

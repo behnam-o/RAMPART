@@ -9,15 +9,19 @@ import pytest
 
 from rampart.core.errors import InfrastructureError
 from rampart.core.evaluator import BaseEvaluator
+from rampart.core.execution import execute_trials_async
 from rampart.core.manifest import AppManifest
+from rampart.core.prompt_driver import PromptDecision
 from rampart.core.result import SafetyStatus
 from rampart.core.types import (
     EvalContext,
     EvalOutcome,
     EvalResult,
     ObservabilityLevel,
+    Request,
     Response,
     ToolCall,
+    Turn,
 )
 from rampart.drivers.static import StaticDriver
 from rampart.evaluators import (
@@ -27,7 +31,7 @@ from rampart.evaluators import (
 )
 from rampart.probes import Probes
 from rampart.probes._single_turn import _build_summary
-from tests.fixtures import MockAdapter
+from tests.fixtures import MockAdapter, MockSession
 
 
 class _Unrenderable:
@@ -88,6 +92,23 @@ class _DetectsToolCall(BaseEvaluator):
             outcome=EvalOutcome.NOT_DETECTED,
             rationale=f"{self._tool_name} not called",
         )
+
+
+class _StatefulDriver:
+    """Driver that emits one prompt over its lifetime."""
+
+    def __init__(self) -> None:
+        self._used = False
+
+    async def next_prompt_async(
+        self,
+        *,
+        history: list[Turn],
+    ) -> PromptDecision | None:
+        if self._used:
+            return None
+        self._used = True
+        return PromptDecision(request=Request(prompt="fresh"))
 
 
 class TestProbePolarity:
@@ -205,6 +226,62 @@ class TestProbeStrategyName:
         ).execute_async(adapter=adapter)
 
         assert result.strategy == "probe"
+
+
+class TestProbePopulationIsolation:
+    async def test_each_trial_creates_a_distinct_session_async(self) -> None:
+        class TrackingAdapter(MockAdapter):
+            def __init__(self) -> None:
+                super().__init__(
+                    responses=[Response(text="ok")],
+                    manifest=AppManifest(name="test-agent"),
+                )
+                self.sessions: list[MockSession] = []
+
+            async def create_session_async(self) -> MockSession:
+                session = await super().create_session_async()
+                self.sessions.append(session)
+                return session
+
+        adapter = TrackingAdapter()
+
+        await execute_trials_async(
+            execution_factory=lambda: Probes.behavior(
+                prompt="test",
+                evaluator=_DetectsAlways(),
+            ),
+            adapter=adapter,
+            n=3,
+            threshold=1.0,
+        )
+
+        assert len(adapter.sessions) == 3
+        assert len({id(session) for session in adapter.sessions}) == 3
+
+    async def test_each_trial_constructs_a_fresh_driver_async(self) -> None:
+        drivers: list[_StatefulDriver] = []
+
+        def create_driver() -> _StatefulDriver:
+            driver = _StatefulDriver()
+            drivers.append(driver)
+            return driver
+
+        population = await execute_trials_async(
+            execution_factory=lambda: Probes.behavior(
+                driver=create_driver(),
+                evaluator=_NeverDetects(),
+            ),
+            adapter=_adapter(responses=[Response(text="ok")]),
+            n=3,
+            threshold=0.0,
+        )
+
+        assert len(drivers) == 3
+        assert [result.turns[0].request.prompt for result in population.results] == [
+            "fresh",
+            "fresh",
+            "fresh",
+        ]
 
 
 class TestProbePromptCoercion:
