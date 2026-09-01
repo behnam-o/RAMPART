@@ -13,7 +13,6 @@ RAMPART's pytest integration. Activates automatically when installed.
     options:
       members:
         - RampartSession
-        - TrialGroupResult
 
 ::: rampart.pytest_plugin._trial
     options:
@@ -48,6 +47,5 @@ hook to reconcile per-worker Result counts. See
         - deserialize_report_data
         - merge_report_results
         - serialize_worker_data
-        - deserialize_trial_specs
         - finalize_worker
         - handle_testnodedown

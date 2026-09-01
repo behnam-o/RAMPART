@@ -436,81 +436,6 @@ def _resolve_hook_sinks(*, config: pytest.Config) -> list[ReportSink]:
     return sinks
 
 
-def _aggregate_trial_results(
-    *,
-    rampart_session: RampartSession,
-) -> None:
-    """Aggregate any legacy trial specs present in session state.
-
-    Trial markers no longer register specs or clone items. This compatibility
-    path handles specs supplied through older worker payloads.
-
-    Args:
-        rampart_session (RampartSession): The RAMPART session state.
-    """
-    groups: dict[str, list[tuple[str, float]]] = {}
-    for clone_nodeid, spec in rampart_session.trial_specs.items():
-        groups.setdefault(spec.base_nodeid, []).append(
-            (clone_nodeid, spec.threshold),
-        )
-
-    for base_nodeid, clones in groups.items():
-        # All clones of the same base share the same threshold; pick any.
-        threshold = clones[0][1]
-        rampart_session.record_trial_group(
-            base_nodeid=base_nodeid,
-            clone_nodeids=[c[0] for c in clones],
-            threshold=threshold,
-        )
-
-
-def _evaluate_gates(
-    *,
-    rampart_session: RampartSession,
-) -> None:
-    """Log trial group gate results.
-
-    Reports whether each trial group passed or failed based on:
-    - Any ERROR -> FAIL
-    - Pass rate at or above threshold -> PASS
-    - Otherwise, UNSAFE or UNDETERMINED -> FAIL
-
-    Args:
-        rampart_session (RampartSession): The RAMPART session state.
-    """
-    for base_nodeid, group in sorted(rampart_session.trial_groups.items()):
-        if group.status is SafetyStatus.SAFE:
-            logger.info(
-                "Gate PASSED: %s — %d/%d safe (%.0f%% pass rate, threshold: %.0f%%)",
-                base_nodeid,
-                group.safe,
-                group.total,
-                group.pass_rate * 100,
-                group.threshold * 100,
-            )
-        elif group.status is SafetyStatus.ERROR:
-            logger.info(
-                "Gate FAILED: %s — %d/%d runs had errors",
-                base_nodeid,
-                group.errors,
-                group.total,
-            )
-        elif group.status is SafetyStatus.UNSAFE:
-            logger.info(
-                "Gate FAILED: %s — %d/%d runs were UNSAFE",
-                base_nodeid,
-                group.unsafe,
-                group.total,
-            )
-        else:
-            logger.info(
-                "Gate FAILED: %s — pass rate %.0f%% below threshold %.0f%%",
-                base_nodeid,
-                group.pass_rate * 100,
-                group.threshold * 100,
-            )
-
-
 def _enforce_incomplete_exit_status(
     *,
     session: pytest.Session,
@@ -581,13 +506,10 @@ def pytest_sessionfinish(
         )
         finalize_worker(
             config=session.config,
-            session=rampart_session,
             streamed_result_count=streamed_result_count,
         )
         return
 
-    _aggregate_trial_results(rampart_session=rampart_session)
-    _evaluate_gates(rampart_session=rampart_session)
     _enforce_incomplete_exit_status(session=session, rampart_session=rampart_session)
 
     if is_xdist_controller(config=session.config):
@@ -737,28 +659,6 @@ def _write_result_line(
         )
 
 
-def _write_trial_group_lines(
-    *,
-    terminalreporter: TerminalReporter,
-    rampart_session: RampartSession,
-) -> None:
-    """Write trial group aggregate lines to the terminal.
-
-    Format: ``PASS  test_name [8/10 safe, 80% defense rate, threshold: 70%] — PASSED``
-
-    Args:
-        terminalreporter: The pytest terminal reporter.
-        rampart_session (RampartSession): The RAMPART session state.
-    """
-    for base_nodeid, group in sorted(rampart_session.trial_groups.items()):
-        test_name = base_nodeid.split("::")[-1] if "::" in base_nodeid else base_nodeid
-        terminalreporter.write_line(
-            f"  {group.terminal_label}  {test_name} "
-            f"[{group.detail}, {group.pass_rate:.0%} pass rate, "
-            f"threshold: {group.threshold:.0%}] -- {group.verdict}",
-        )
-
-
 def _write_incomplete_warning(
     *,
     terminalreporter: TerminalReporter,
@@ -792,7 +692,7 @@ def pytest_terminal_summary(
     Fires after all tests complete. Emits an incomplete-run warning first
     (even when no results were collected, since a lost worker can leave
     the run incomplete with zero results), then writes harm-grouped
-    result lines, trial group aggregates, and population statistics.
+    result lines and population statistics.
 
     Args:
         terminalreporter: The pytest terminal reporter.
@@ -834,11 +734,6 @@ def pytest_terminal_summary(
                 result=result,
                 test_name=test_name,
             )
-
-    _write_trial_group_lines(
-        terminalreporter=terminalreporter,
-        rampart_session=rampart_session,
-    )
 
     stats = report.population_summary()
     if stats.total_runs > 0:
