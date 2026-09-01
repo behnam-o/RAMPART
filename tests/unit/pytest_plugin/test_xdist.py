@@ -32,7 +32,7 @@ from rampart.core.types import (
     ToolCall,
     Turn,
 )
-from rampart.pytest_plugin._session import RampartSession, TrialSpec
+from rampart.pytest_plugin._session import RampartSession
 from rampart.pytest_plugin._xdist import (
     DEFAULT_SIZE_LIMIT_BYTES,
     MAX_METADATA_DEPTH,
@@ -49,8 +49,6 @@ from rampart.pytest_plugin._xdist import (
     _strip_ansi,
     attach_report_results,
     deserialize_report_data,
-    deserialize_trial_specs,
-    discover_sinks_from_conftest,
     finalize_worker,
     get_dist_mode,
     get_worker_count,
@@ -61,7 +59,7 @@ from rampart.pytest_plugin._xdist import (
     serialize_report_data,
     serialize_worker_data,
 )
-from rampart.reporting.sink import ReportSink, TestRunReport
+from rampart.reporting.sink import TestRunReport
 
 
 def _make_result(
@@ -1015,7 +1013,6 @@ class TestHandleTestnodedown:
         node.workeroutput = {
             WORKEROUTPUT_KEY: {
                 "schema": SCHEMA_VERSION,
-                "trial_specs": [],
             },
         }
         handle_testnodedown(
@@ -1029,7 +1026,6 @@ class TestHandleTestnodedown:
     def test_records_incomplete_on_streamed_count_mismatch(self) -> None:
         session = RampartSession()
         payload = serialize_worker_data(
-            session=RampartSession(),
             streamed_result_count=2,
         )
         node = MagicMock()
@@ -1046,7 +1042,6 @@ class TestHandleTestnodedown:
     def test_accepts_matching_streamed_count(self) -> None:
         session = RampartSession()
         payload = serialize_worker_data(
-            session=RampartSession(),
             streamed_result_count=2,
         )
         node = MagicMock()
@@ -1059,45 +1054,6 @@ class TestHandleTestnodedown:
             received_result_count=2,
         )
         assert session.is_incomplete is False
-
-    def test_merges_trial_specs_on_success(self) -> None:
-        session = RampartSession()
-        worker_session = RampartSession()
-        worker_session.register_trial_spec(
-            clone_nodeid="test.py::test_x[trial-0]",
-            base_nodeid="test.py::test_x",
-            threshold=0.8,
-        )
-        worker_session.register_trial_spec(
-            clone_nodeid="test.py::test_x[trial-1]",
-            base_nodeid="test.py::test_x",
-            threshold=0.8,
-        )
-        payload = serialize_worker_data(
-            session=worker_session,
-            streamed_result_count=0,
-        )
-        node = MagicMock()
-        node.gateway.id = "gw1"
-        node.workeroutput = {WORKEROUTPUT_KEY: payload}
-        handle_testnodedown(
-            session=session,
-            node=node,
-            error=None,
-            received_result_count=0,
-        )
-        assert session.is_incomplete is False
-        assert set(session.trial_specs) == {
-            "test.py::test_x[trial-0]",
-            "test.py::test_x[trial-1]",
-        }
-        assert (
-            session.trial_specs["test.py::test_x[trial-0]"].base_nodeid
-            == "test.py::test_x"
-        )
-        assert session.trial_specs[
-            "test.py::test_x[trial-0]"
-        ].threshold == pytest.approx(0.8)
 
 
 class TestOrderingDeterminism:
@@ -1190,99 +1146,13 @@ class TestOrderingDeterminism:
         assert order == [(0, "gw0"), (0, "gw1"), (1, "gw0"), (1, "gw1")]
 
 
-class TestTrialSpecs:
-    def test_serialize_round_trip(self) -> None:
-        session = RampartSession()
-        session.register_trial_spec(
-            clone_nodeid="t.py::a[trial-0]",
-            base_nodeid="t.py::a",
-            threshold=0.75,
-        )
-        session.register_trial_spec(
-            clone_nodeid="t.py::a[trial-1]",
-            base_nodeid="t.py::a",
-            threshold=0.75,
-        )
-        payload = serialize_worker_data(
-            session=session,
-            streamed_result_count=2,
-        )
-
-        # Payload must survive a JSON round-trip (xdist transports JSON).
-        decoded = json.loads(json.dumps(payload))
-        specs = deserialize_trial_specs(data=decoded)
-
-        assert specs == {
-            "t.py::a[trial-0]": TrialSpec(base_nodeid="t.py::a", threshold=0.75),
-            "t.py::a[trial-1]": TrialSpec(base_nodeid="t.py::a", threshold=0.75),
-        }
-
-    def test_payload_without_trials_returns_empty_dict(self) -> None:
-        session = RampartSession()
-        payload = serialize_worker_data(
-            session=session,
-            streamed_result_count=0,
-        )
-        assert deserialize_trial_specs(data=payload) == {}
-
-    def test_skips_malformed_entries(self) -> None:
-        data: dict[str, Any] = {
-            "schema": SCHEMA_VERSION,
-            "trial_specs": [
-                {"clone_nodeid": "ok", "base_nodeid": "b", "threshold": 0.5},
-                "not-a-dict",
-                {"clone_nodeid": "", "base_nodeid": "b", "threshold": 0.5},
-                {"clone_nodeid": "x", "base_nodeid": 123, "threshold": 0.5},
-                {"clone_nodeid": "y", "base_nodeid": "b"},
-            ],
-        }
-        specs = deserialize_trial_specs(data=data)
-        assert set(specs) == {"ok", "y"}
-        assert specs["y"].threshold == pytest.approx(0.0)
-
-    def test_clamps_non_finite_threshold(self) -> None:
-        data: dict[str, Any] = {
-            "schema": SCHEMA_VERSION,
-            "trial_specs": [
-                {"clone_nodeid": "a", "base_nodeid": "b", "threshold": float("inf")},
-                {"clone_nodeid": "c", "base_nodeid": "d", "threshold": float("nan")},
-            ],
-        }
-        specs = deserialize_trial_specs(data=data)
-        assert specs["a"].threshold == pytest.approx(0.0)
-        assert specs["c"].threshold == pytest.approx(0.0)
-
-    def test_merge_is_idempotent(self) -> None:
-        session = RampartSession()
-        spec = TrialSpec(base_nodeid="b", threshold=0.5)
-        session.merge_trial_specs(trial_specs={"k": spec})
-        session.merge_trial_specs(trial_specs={"k": spec})
-        assert session.trial_specs == {"k": spec}
-
-    def test_merge_first_writer_wins(self) -> None:
-        session = RampartSession()
-        original = TrialSpec(base_nodeid="b1", threshold=0.5)
-        replacement = TrialSpec(base_nodeid="b2", threshold=0.9)
-        session.merge_trial_specs(trial_specs={"k": original})
-        session.merge_trial_specs(trial_specs={"k": replacement})
-        # Defensive: the first registered spec wins so a worker can't
-        # silently override what the controller already saw at collection.
-        assert session.trial_specs["k"] == original
-
-    def test_invalid_payload_raises(self) -> None:
-        with pytest.raises(WorkerOutputError):
-            deserialize_trial_specs(data="not a dict")
-
-
 class TestFinalizeWorker:
     def test_no_op_on_controller(self) -> None:
         config = _make_config(is_worker=False, numprocesses=2)
         workeroutput: dict[str, Any] = {}
         config.workeroutput = workeroutput
-        session = RampartSession()
         finalize_worker(
             config=config,
-            session=session,
             streamed_result_count=0,
         )
         assert WORKEROUTPUT_KEY not in workeroutput
@@ -1291,12 +1161,8 @@ class TestFinalizeWorker:
         config = _make_config(is_worker=True)
         workeroutput: dict[str, Any] = {}
         config.workeroutput = workeroutput
-        session = _make_session_with_results(
-            results_by_nodeid={"n": [_make_result(summary="x")]},
-        )
         finalize_worker(
             config=config,
-            session=session,
             streamed_result_count=1,
         )
         assert WORKEROUTPUT_KEY in workeroutput
@@ -1402,145 +1268,6 @@ class TestReportEnvelope:
         )
         assert (
             len(json.dumps(marker["metadata"]["_pytest_nodeid"]).encode("utf-8")) <= 512
-        )
-
-
-class TestSinkDiscovery:
-    def test_finds_callable_rampart_sinks(self) -> None:
-        sink = MagicMock(spec=ReportSink)
-        plugin = MagicMock(
-            spec=["rampart_sinks", "__name__"],
-            rampart_sinks=lambda: [sink],
-            __name__="mod",
-        )
-        config = MagicMock()
-        config.pluginmanager.get_plugins.return_value = [plugin]
-        result = discover_sinks_from_conftest(config=config)
-        assert sink in result
-
-    def test_finds_list_rampart_sinks(self) -> None:
-        sink = MagicMock(spec=ReportSink)
-        plugin = MagicMock(
-            spec=["rampart_sinks", "__name__"],
-            rampart_sinks=[sink],
-            __name__="mod",
-        )
-        config = MagicMock()
-        config.pluginmanager.get_plugins.return_value = [plugin]
-        result = discover_sinks_from_conftest(config=config)
-        assert sink in result
-
-    def test_returns_empty_when_no_rampart_sinks(self) -> None:
-        plugin = MagicMock(spec=["__name__"], __name__="mod")
-        config = MagicMock()
-        config.pluginmanager.get_plugins.return_value = [plugin]
-        result = discover_sinks_from_conftest(config=config)
-        assert result == []
-
-    def test_warns_on_callable_with_required_args(
-        self,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        def needs_arg(other: object) -> list[ReportSink]:
-            return []
-
-        plugin = MagicMock(
-            spec=["rampart_sinks", "__name__"],
-            rampart_sinks=needs_arg,
-            __name__="mod",
-        )
-        config = MagicMock()
-        config.pluginmanager.get_plugins.return_value = [plugin]
-        with caplog.at_level(logging.WARNING):
-            result = discover_sinks_from_conftest(config=config)
-        assert result == []
-        assert any("requires arguments" in r.getMessage() for r in caplog.records)
-
-    def test_resolves_parameterless_fixture_form(self) -> None:
-        sink = MagicMock(spec=ReportSink)
-
-        @pytest.fixture
-        def rampart_sinks() -> list[ReportSink]:
-            return [sink]
-
-        plugin = MagicMock(
-            spec=["rampart_sinks", "__name__"],
-            rampart_sinks=rampart_sinks,
-            __name__="mod",
-        )
-        config = MagicMock()
-        config.pluginmanager.get_plugins.return_value = [plugin]
-        result = discover_sinks_from_conftest(config=config)
-        assert sink in result
-
-    def test_warns_and_skips_fixture_with_dependencies(
-        self,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        @pytest.fixture
-        def rampart_sinks(tmp_path: object) -> list[ReportSink]:
-            return []
-
-        plugin = MagicMock(
-            spec=["rampart_sinks", "__name__"],
-            rampart_sinks=rampart_sinks,
-            __name__="mod",
-        )
-        config = MagicMock()
-        config.pluginmanager.get_plugins.return_value = [plugin]
-        with caplog.at_level(logging.WARNING):
-            result = discover_sinks_from_conftest(config=config)
-        assert result == []
-        assert any("requires arguments" in r.getMessage() for r in caplog.records)
-        assert any("pytest_rampart_sinks" in r.getMessage() for r in caplog.records)
-
-
-class TestSinkDeprecationWarning:
-    """Deprecation-warning contract for controller-side ``rampart_sinks`` discovery.
-
-    The ``@pytest.fixture`` form warns when resolved; the module-level list form
-    is not a fixture and must stay silent. These fast, in-process checks replace
-    the equivalent ``pytester`` subprocess test in ``test_xdist_aggregation.py``.
-    """
-
-    def test_fixture_form_emits_deprecation_warning(self) -> None:
-        sink = MagicMock(spec=ReportSink)
-
-        @pytest.fixture
-        def rampart_sinks() -> list[ReportSink]:
-            return [sink]
-
-        plugin = MagicMock(
-            spec=["rampart_sinks", "__name__"],
-            rampart_sinks=rampart_sinks,
-            __name__="mod",
-        )
-        config = MagicMock()
-        config.pluginmanager.get_plugins.return_value = [plugin]
-        with pytest.warns(
-            DeprecationWarning, match="rampart_sinks fixture is deprecated"
-        ):
-            result = discover_sinks_from_conftest(config=config)
-        assert sink in result
-
-    def test_list_form_does_not_emit_deprecation_warning(
-        self,
-        recwarn: pytest.WarningsRecorder,
-    ) -> None:
-        sink = MagicMock(spec=ReportSink)
-        plugin = MagicMock(
-            spec=["rampart_sinks", "__name__"],
-            rampart_sinks=[sink],
-            __name__="mod",
-        )
-        config = MagicMock()
-        config.pluginmanager.get_plugins.return_value = [plugin]
-        result = discover_sinks_from_conftest(config=config)
-        assert sink in result
-        assert not any(
-            issubclass(w.category, DeprecationWarning)
-            and "rampart_sinks fixture is deprecated" in str(w.message)
-            for w in recwarn
         )
 
 

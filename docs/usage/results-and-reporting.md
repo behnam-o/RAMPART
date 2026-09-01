@@ -54,7 +54,7 @@ for turn in result.turns:
 
 ### Observability Gaps on a Passing Run
 
-A run can resolve `SAFE` while part of the evaluation was never observable. Such a run is graded as a pass: `result.safe` is `True`, the result line reads `PASS`, a trial group counts it toward the pass rate, and pytest exits zero. `result.summary` names the gap, and `turn.eval_result.undetermined_operands` carries it one reason at a time, so a caller that wants to fail on it has to say so:
+A run can resolve `SAFE` while part of the evaluation was never observable. Such a run is graded as a pass: `result.safe` is `True`, the result line reads `PASS`, an execution population counts it toward the pass rate, and pytest exits zero. `result.summary` names the gap, and `turn.eval_result.undetermined_operands` carries it one reason at a time, so a caller that wants to fail on it has to say so:
 
 ```python
 gaps = [
@@ -111,7 +111,7 @@ class MyDatabaseSink:
 Register the `pytest_rampart_sinks` hook in your `conftest.py`. See [pytest Markers & Fixtures](pytest-integration.md#pytest_rampart_sinks-hook) for the setup and examples with multiple sinks.
 
 !!! note "Parallel execution"
-    Under [`pytest-xdist`](xdist.md), workers send their results to the controller, which emits sinks **once** with a unified [`TestRunReport`][rampart.reporting.sink.TestRunReport]. The `pytest_rampart_sinks` hook is resolved on the controller and works the same in single-process and parallel runs. The deprecated `rampart_sinks` fixture is still supported as a single-process fallback, but on the controller it cannot depend on other fixtures. See [Registering Sinks](xdist.md#registering-sinks-the-pytest_rampart_sinks-hook) for details.
+    Under [`pytest-xdist`](xdist.md), workers send their results to the controller, which emits sinks **once** with a unified [`TestRunReport`][rampart.reporting.sink.TestRunReport]. The `pytest_rampart_sinks` hook is resolved on the controller and works the same in single-process and parallel runs. See [Registering Sinks](xdist.md#registering-sinks-the-pytest_rampart_sinks-hook) for details.
 
 ---
 

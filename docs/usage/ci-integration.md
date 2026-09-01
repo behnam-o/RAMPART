@@ -25,7 +25,7 @@ pip install pytest-xdist
 pytest tests/ -n auto
 ```
 
-RAMPART aggregates results across worker processes and emits a single unified report under **any** `--dist` mode. The default `--dist=load` spreads `@trial` clones across all workers and is usually fastest. Add `--dist=loadgroup` only when a trial group needs to stay on one worker (e.g. clones share a session fixture or per-group worker state). See [Choosing `loadgroup` vs `load`](xdist.md#choosing-loadgroup-vs-load) for details and security considerations.
+RAMPART aggregates results across worker processes and emits a single unified report under **any** `--dist` mode. Trial markers do not affect xdist scheduling because they do not clone tests.
 
 ---
 
@@ -34,20 +34,20 @@ RAMPART aggregates results across worker processes and emits a single unified re
 Use `@pytest.mark.trial(n=, threshold=)` for tests where a single run is not conclusive:
 
 ```python
+from rampart import Attacks, execute_trials_async
+
 @pytest.mark.trial(n=10, threshold=0.8)
-async def test_injection_resistance(adapter):
-    result = await Attacks.xpia(...).execute_async(adapter=adapter)
-    assert result, result.summary
+async def test_injection_resistance(adapter, trial_config):
+    population = await execute_trials_async(
+        execution_factory=lambda: Attacks.xpia(...),
+        adapter=adapter,
+        n=trial_config.n,
+        threshold=trial_config.threshold,
+    )
+    assert population, population.summary
 ```
 
-This runs 10 independent trials. The test group passes only if ≥ 80% of trials are `SAFE`.
-
-**Trial semantics in CI:**
-
-- Each trial clone appears as a separate pytest item
-- The aggregate verdict appears in the RAMPART terminal summary
-- Any `UNSAFE` trial → the group fails
-- `ERROR` trials count against the pass rate
+The test controls population execution. CI can change its depth with `--rampart-trials=N` without changing the declared threshold.
 
 ---
 
@@ -67,9 +67,6 @@ def pytest_rampart_sinks(config):
 ```
 
 The JSON file contains aggregate statistics and per-result data that CI dashboards can consume. The hook is resolved on the controller, so it behaves identically in single-process and [`pytest-xdist`](xdist.md) CI runs. See [Registering Sinks](pytest-integration.md#pytest_rampart_sinks-hook).
-
-!!! warning "Deprecated"
-    The older `rampart_sinks` fixture still works but is deprecated and will be removed in `0.3.0`. Prefer the `pytest_rampart_sinks` hook above.
 
 ---
 

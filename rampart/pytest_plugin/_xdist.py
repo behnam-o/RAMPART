@@ -23,7 +23,6 @@ import math
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, cast
 
-from rampart.common.deprecation import emit_deprecation_warning
 from rampart.common.text import safe_float, safe_str, safe_str_list
 from rampart.common.text import strip_ansi as _strip_ansi_impl
 from rampart.core.result import (
@@ -45,12 +44,8 @@ from rampart.core.types import (
     ToolCall,
     Turn,
 )
-from rampart.pytest_plugin._session import TrialSpec
-from rampart.reporting.sink import ReportSink
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     import pytest
     from _typeshed import ConvertibleToInt
 
@@ -730,17 +725,15 @@ def attach_report_results(
 
 def serialize_worker_data(
     *,
-    session: RampartSession,
     streamed_result_count: int,
 ) -> dict[str, Any]:
     """Serialize slim session-level worker data for the controller.
 
     Results are deliberately absent because call-phase reports are the
-    sole Result transport. Workeroutput retains trial specs and the
-    expected streamed Result count for completeness reconciliation.
+    sole Result transport. Workeroutput retains the expected streamed
+    Result count for completeness reconciliation.
 
     Args:
-        session (RampartSession): The worker's session state.
         streamed_result_count (int): Result representations attached to
             reports by this worker.
 
@@ -751,14 +744,6 @@ def serialize_worker_data(
     return {
         "schema": SCHEMA_VERSION,
         _STREAMED_RESULT_COUNT: streamed_result_count,
-        "trial_specs": [
-            {
-                "clone_nodeid": clone_nodeid,
-                "base_nodeid": spec.base_nodeid,
-                "threshold": safe_float(value=spec.threshold) or 0.0,
-            }
-            for clone_nodeid, spec in session.trial_specs.items()
-        ],
     }
 
 
@@ -1315,65 +1300,9 @@ def deserialize_report_data(
     return {nodeid: deserialized}, truncated
 
 
-def deserialize_trial_specs(*, data: object) -> dict[str, TrialSpec]:
-    """Deserialize the ``trial_specs`` section of a worker payload.
-
-    Missing or malformed entries are skipped rather than raised so
-    that a partially-corrupt payload still merges results. The
-    ``trial_specs`` field is optional: payloads without trials emit
-    an empty list and this function returns an empty dict.
-
-    Args:
-        data (object): The deserialized JSON object from
-            ``node.workeroutput``.
-
-    Returns:
-        dict[str, TrialSpec]: Trial specs keyed by clone node ID.
-
-    Raises:
-        SchemaVersionError: Missing or unknown schema version.
-        WorkerOutputError: ``data`` is not a dict payload.
-    """
-    typed = _validate_schema(data=data)
-    raw_specs = typed.get("trial_specs", [])
-    if not isinstance(raw_specs, list):
-        return {}
-    out: dict[str, TrialSpec] = {}
-    for spec in cast("list[Any]", raw_specs):
-        if not isinstance(spec, dict):
-            continue
-        spec_dict = cast("dict[str, Any]", spec)
-        clone_nodeid = spec_dict.get("clone_nodeid")
-        base_nodeid = spec_dict.get("base_nodeid")
-        if not isinstance(clone_nodeid, str) or not isinstance(base_nodeid, str):
-            continue
-        if not clone_nodeid or not base_nodeid:
-            continue
-        raw_threshold = spec_dict.get("threshold", 0.0)
-        try:
-            threshold = (
-                float(raw_threshold)
-                if isinstance(
-                    raw_threshold,
-                    int | float,
-                )
-                else 0.0
-            )
-        except (TypeError, ValueError):
-            threshold = 0.0
-        if not math.isfinite(threshold):
-            threshold = 0.0
-        out[clone_nodeid] = TrialSpec(
-            base_nodeid=base_nodeid,
-            threshold=threshold,
-        )
-    return out
-
-
 def finalize_worker(
     *,
     config: pytest.Config,
-    session: RampartSession,
     streamed_result_count: int,
 ) -> None:
     """Serialize slim worker session state into ``config.workeroutput``.
@@ -1384,7 +1313,6 @@ def finalize_worker(
 
     Args:
         config (pytest.Config): The pytest configuration object.
-        session (RampartSession): The worker's session state.
         streamed_result_count (int): Number of Result representations
             attached to test reports by this worker.
     """
@@ -1395,38 +1323,8 @@ def finalize_worker(
         config.workeroutput,  # ty: ignore[unresolved-attribute]
     )
     workeroutput[WORKEROUTPUT_KEY] = serialize_worker_data(
-        session=session,
         streamed_result_count=streamed_result_count,
     )
-
-
-def _safe_deserialize_trial_specs(
-    *,
-    payload: object,
-    worker_id_str: str,
-) -> dict[str, TrialSpec]:
-    """Deserialize trial specs from a worker payload without raising.
-
-    Trial specs are optional metadata: a corrupt or absent block must
-    never block result merging. Errors are logged at warning level and
-    return an empty dict.
-
-    Args:
-        payload (object): The deserialized worker payload.
-        worker_id_str (str): Worker identifier for logging.
-
-    Returns:
-        dict[str, TrialSpec]: Specs keyed by clone nodeid (possibly empty).
-    """
-    try:
-        return deserialize_trial_specs(data=payload)
-    except WorkerOutputError as exc:
-        logger.warning(
-            "Failed to deserialize trial specs from worker %s: %s",
-            worker_id_str,
-            exc,
-        )
-        return {}
 
 
 def _tag_source_worker(
@@ -1568,12 +1466,6 @@ def handle_testnodedown(
         )
         session.mark_incomplete(reason=f"worker {worker_id_str} missing RAMPART output")
         return
-    trial_specs = _safe_deserialize_trial_specs(
-        payload=cast("object", payload),
-        worker_id_str=worker_id_str,
-    )
-    if trial_specs:
-        session.merge_trial_specs(trial_specs=trial_specs)
     try:
         expected_result_count = _deserialize_streamed_result_count(payload=payload)
     except WorkerOutputError:
@@ -1598,165 +1490,3 @@ def handle_testnodedown(
                 f"(expected {expected_result_count}, received {received_result_count})"
             ),
         )
-
-
-def discover_sinks_from_conftest(*, config: pytest.Config) -> list[ReportSink]:
-    """Discover ``rampart_sinks`` definitions from registered conftest modules.
-
-    Workers run the standard ``_rampart_sink_bootstrap`` fixture to
-    register sinks via pytest's fixture machinery. The controller has
-    no test execution, so fixtures do not run. This function scans
-    registered plugins for a module-level ``rampart_sinks`` attribute
-    and resolves it:
-
-    - If callable with zero arguments, invoke it and use the return.
-    - If a list, use it directly.
-    - Otherwise, log a warning and skip.
-
-    Sinks that depend on other fixtures cannot be discovered this way.
-    Such configurations should register sinks via the
-    ``pytest_rampart_sinks`` hook, which is resolved identically on the
-    controller and in every worker.
-
-    Args:
-        config (pytest.Config): The pytest configuration object.
-
-    Returns:
-        list[ReportSink]: Discovered sinks (may be empty).
-    """
-    discovered: list[ReportSink] = []
-    seen: set[int] = set()
-    for plugin in config.pluginmanager.get_plugins():
-        if plugin is None or id(plugin) in seen:
-            continue
-        seen.add(id(plugin))
-        candidate = getattr(plugin, "rampart_sinks", None)
-        if candidate is None:
-            continue
-        resolved = _resolve_sink_candidate(candidate=candidate, plugin=plugin)
-        if resolved is None:
-            continue
-        for sink in resolved:
-            if isinstance(sink, ReportSink):
-                discovered.append(sink)
-            else:
-                logger.warning(
-                    "rampart_sinks in %s yielded a non-ReportSink: %r",
-                    getattr(plugin, "__name__", repr(plugin)),
-                    sink,
-                )
-    return discovered
-
-
-def _unwrap_fixture_function(candidate: object) -> Callable[..., object] | None:
-    """Return the underlying function of a ``@pytest.fixture``-wrapped object.
-
-    pytest >= 8.4 wraps fixtures in a ``FixtureFunctionDefinition`` whose
-    ``inspect.isfunction`` is False; the real function is reachable via
-    ``_get_wrapped_function()`` (with ``_fixture_function`` / ``__wrapped__``
-    as fallbacks). Returns the recovered function, or None when
-    ``candidate`` is not a fixture wrapper we can unwrap.
-    """
-    import inspect  # ruff: ignore[import-outside-top-level]
-
-    getter = getattr(candidate, "_get_wrapped_function", None)
-    if callable(getter):
-        try:
-            wrapped = getter()
-        except Exception:  # ruff: ignore[blind-except] — defensive across pytest versions
-            wrapped = None
-        if inspect.isfunction(wrapped):
-            return wrapped
-    for attr in ("_fixture_function", "__wrapped__"):
-        wrapped = getattr(candidate, attr, None)
-        if inspect.isfunction(wrapped):
-            return wrapped
-    return None
-
-
-def _resolve_sink_candidate(
-    *,
-    candidate: object,
-    plugin: object,
-) -> list[object] | None:
-    """Resolve a module-level ``rampart_sinks`` attribute into a list of sinks.
-
-    Handles three shapes:
-
-    - A list — used directly.
-    - A zero-argument plain function — called, and its list return used.
-    - A ``@pytest.fixture``-wrapped *parameterless* function — unwrapped to
-      its underlying function and called directly (no pytest fixture
-      machinery), so the documented session-fixture fallback keeps working
-      on the xdist controller.
-
-    Any other shape — a fixture that depends on other fixtures, a callable
-    requiring arguments, or a non-list return — is skipped with a warning
-    pointing at the ``pytest_rampart_sinks`` hook, which works identically
-    on the controller and in every worker.
-
-    Returns:
-        None on failure (logged) so the caller can continue scanning other plugins.
-
-    Raises:
-        KeyboardInterrupt: If the function is interrupted by the user.
-        SystemExit: If the function attempts to exit the program.
-    """
-    import inspect  # ruff: ignore[import-outside-top-level]
-
-    plugin_name = getattr(plugin, "__name__", repr(plugin))
-    if isinstance(candidate, list):
-        return cast("list[object]", candidate)
-
-    func: Callable[..., object] | None
-    if inspect.isfunction(candidate):
-        func = candidate
-    else:
-        func = _unwrap_fixture_function(candidate)
-        if func is not None:
-            emit_deprecation_warning(
-                old_item="The rampart_sinks fixture",
-                new_item="the pytest_rampart_sinks hook",
-                removed_in="0.3.0",
-            )
-    if func is None:
-        logger.warning(
-            "rampart_sinks in %s is %s, which controller-side discovery "
-            "cannot resolve. Register sinks via the pytest_rampart_sinks "
-            "hook instead.",
-            plugin_name,
-            type(candidate).__name__,
-        )
-        return None
-
-    sig = inspect.signature(func)
-    if len(sig.parameters) > 0:
-        logger.warning(
-            "rampart_sinks in %s requires arguments (%s); controller-side "
-            "discovery cannot satisfy those. Use the pytest_rampart_sinks "
-            "hook, or provide a parameterless function or a list.",
-            plugin_name,
-            list(sig.parameters),
-        )
-        return None
-
-    try:
-        value = func()
-    except (KeyboardInterrupt, SystemExit):
-        raise
-    except Exception as exc:  # ruff: ignore[blind-except] — broad on purpose: user code
-        logger.warning(
-            "rampart_sinks in %s raised during controller-side discovery: %s",
-            plugin_name,
-            exc,
-        )
-        return None
-
-    if isinstance(value, list):
-        return cast("list[object]", value)
-    logger.warning(
-        "rampart_sinks in %s returned %s instead of list[ReportSink].",
-        plugin_name,
-        type(value).__name__,
-    )
-    return None

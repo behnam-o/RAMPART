@@ -13,10 +13,12 @@ from rampart.pytest_plugin._collection import (
     record_result,
 )
 from rampart.pytest_plugin._session import RampartSession
+from rampart.pytest_plugin._trial import TrialConfig
 
 __all__ = [
     "RampartSession",
     "ResultCollectionHandler",
     "ResultCollector",
+    "TrialConfig",
     "record_result",
 ]

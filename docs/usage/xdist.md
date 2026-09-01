@@ -56,52 +56,9 @@ The result: **one** `JsonFileReportSink` output file, **one** call to `MyCustomS
 
 ## Trial Tests with xdist
 
-`@pytest.mark.trial(n=, threshold=)` clones a test into N independent runs. Under xdist, clones may be distributed across workers depending on the `--dist` mode.
+`@pytest.mark.trial` declares population configuration but does not create pytest items, so it does not change xdist scheduling. A marked test runs on one worker like any other test and receives its effective values through `trial_config`.
 
-| `--dist` mode | Trial behavior |
-|---------------|----------------|
-| `loadgroup` | All trial clones for one test pinned to the same worker |
-| `load` (default) | Trial clones distributed across all workers |
-| `loadscope` / `loadfile` | Grouped by class/module/file |
-
-**Correctness is preserved regardless of mode** — the controller aggregates trial groups from the merged result set and evaluates each group's threshold against the full population. You'll see a warning if you use `@trial` markers without `--dist=loadgroup`:
-
-```text
-RAMPART @trial markers present with --dist=load. Trial clones may be
-split across workers. Aggregation remains correct (controller merges
-all results), but using --dist=loadgroup keeps trial clones co-located
-on one worker for better locality.
-```
-
-This warning is **informational, not a correctness signal** — see below for when it's safe to ignore.
-
-### Choosing `loadgroup` vs `load`
-
-**Both modes produce an identical, correct report.** The controller merges per-worker
-partials into one population and evaluates each trial's threshold against the full
-group either way. The choice is about *execution*, not correctness:
-
-- **`load` (default)** spreads a test's trial clones across **all** workers, so a
-  20-clone trial keeps every worker busy. It is usually the **fastest** option and is
-  the right default when trial clones are **independent** (no shared per-group state).
-- **`loadgroup`** pins all clones of one trial group to a **single** worker. Prefer it
-  only when a trial group needs **cohesion** — e.g. clones share a session-scoped
-  fixture, a per-group cache/connection, or other worker-local state that must not be
-  split across processes. The trade-off is less parallelism, so it can run slower.
-
-**Rule of thumb:** independent trials → plain `pytest -n 4` (faster); trials that
-share per-group worker state → `pytest -n 4 --dist=loadgroup`.
-
-As an illustration, one 22-item suite containing a 20-clone trial measured:
-
-| Mode | Command | Wall time | Reports | `total_runs` |
-|------|---------|-----------|---------|--------------|
-| Serial | `pytest -n 0` | 203.4s | 1 | 22 |
-| Parallel, loadgroup | `pytest -n 4 --dist=loadgroup` | 165.5s | 1 | 22 |
-| Parallel, default load | `pytest -n 4` | **113.8s** | 1 | 22 |
-
-All three emit the same single report and the same trial verdict; `load` is fastest
-here because the 20 clones fan out across the 4 workers instead of being pinned to one.
+Use `--rampart-trials=N` to change the population depth supplied to selected tests. Parallelizing the executions within a test is the responsibility of that test or its population-execution helper.
 
 ---
 
@@ -131,57 +88,9 @@ def pytest_rampart_sinks(config):
 - Non-`ReportSink` items (or a non-list return) are dropped with a warning, so one
   malformed implementation cannot break emission.
 
-### Precedence vs the `rampart_sinks` fixture
-
-!!! warning "Deprecated"
-    The `rampart_sinks` fixture is deprecated and will be removed in `0.3.0`.
-    Prefer the `pytest_rampart_sinks` hook above. Resolving the fixture emits a
-    `DeprecationWarning` in both single-process and controller discovery.
-
-The legacy `rampart_sinks` fixture is still supported as a **single-process
-fallback**. The rule is:
-
-- If **any** `pytest_rampart_sinks` hook implementation exists, the hook is
-  authoritative and the fixture path is skipped entirely (so a project that
-  defines both does **not** double-register).
-- If **no** hook implementation exists, RAMPART falls back to the fixture. On the
-  xdist controller this fallback scans registered conftest modules for a
-  `rampart_sinks` attribute.
-
-### Fixture fallback constraints (no hook present)
-
-When you rely on the fixture fallback under xdist, pytest's fixture machinery
-does not run on the controller. RAMPART therefore unwraps a **parameterless**
-`rampart_sinks` fixture and calls its underlying function directly, so these
-shapes resolve:
-
-```python
-# Parameterless session fixture — resolves single-process AND on the
-# xdist controller.
-@pytest.fixture(scope="session")
-def rampart_sinks():
-    return [JsonFileReportSink(output_dir=Path(".report"))]
-
-# Plain list assigned at module level — resolved on the xdist controller
-# only. Single-process discovery looks up a *fixture* named rampart_sinks,
-# so a bare module-level list is silently ignored there; use the fixture
-# form above (or the hook) for single-process runs.
-rampart_sinks = [JsonFileReportSink(output_dir=Path(".report"))]
-```
-
-A **fixture with dependencies** cannot be resolved on the controller and is
-skipped with a warning:
-
-```python
-# Not resolvable on the controller — use the hook instead
-@pytest.fixture(scope="session")
-def rampart_sinks(my_sink_config, db_connection):
-    return [DatabaseSink(connection=db_connection)]
-```
-
-If your sinks need dependencies, **use the `pytest_rampart_sinks` hook** — it
-receives the `pytest.Config` and runs on the controller, so you can build sinks
-from `config` values or environment variables there.
+If your sinks need dependencies, build them inside the hook — it receives the
+`pytest.Config` and runs on the controller, so you can build sinks from `config`
+values or environment variables there.
 
 ---
 
@@ -259,9 +168,6 @@ does not discard normal Results from that worker.
 
 ## Limitations
 
-- Sinks discovered through the **fixture fallback** on the controller cannot depend
-  on other pytest fixtures — use the `pytest_rampart_sinks` hook instead (see
-  [Registering Sinks](#registering-sinks-the-pytest_rampart_sinks-hook)).
 - Results recorded only during fixture teardown are outside the report-streaming
   boundary and are not included.
 - A worker that dies can lose Results whose eligible reports had not reached

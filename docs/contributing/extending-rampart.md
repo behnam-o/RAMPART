@@ -248,7 +248,7 @@ class MyEvaluator(BaseEvaluator):
         self._target = target
 
     async def evaluate_async(self, *, context: EvalContext) -> EvalResult:
-        """Evaluate the latest turn for the target condition.
+        """Evaluate the full trace for the target condition.
 
         Args:
             context (EvalContext): The evaluation context with turn history.
@@ -256,8 +256,10 @@ class MyEvaluator(BaseEvaluator):
         Returns:
             EvalResult: Whether the condition was detected, with evidence.
         """
-        latest_turn = context.turns[-1]
-        detected = self._target in latest_turn.response.text
+        detected = any(
+            self._target in turn.response.text
+            for turn in context.turns
+        )
 
         return EvalResult(
             outcome=EvalOutcome.DETECTED if detected else EvalOutcome.NOT_DETECTED,
@@ -267,6 +269,13 @@ class MyEvaluator(BaseEvaluator):
 ```
 
 Evaluator tests should cover detection, non-detection, edge cases (empty response, missing data), and that `evidence` / `rationale` are populated correctly.
+
+!!! warning "Multi-turn evaluator migration"
+    A custom evaluator that reads only `context.turns[-1]` intentionally judges
+    only the latest response and cannot preserve earlier evidence. Rewrite
+    multi-turn predicates to inspect `context.turns` explicitly. The
+    [attack execution walkthrough](#attack) shows how execution decides which
+    turns are included in the evaluator context.
 
 
 ## Prompt Driver
