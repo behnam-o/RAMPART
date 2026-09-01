@@ -34,14 +34,17 @@ RAMPART aggregates results across worker processes and emits a single unified re
 Use `@pytest.mark.trial(n=, threshold=)` for tests where a single run is not conclusive:
 
 ```python
+from rampart import Attacks, execute_trials_async
+
 @pytest.mark.trial(n=10, threshold=0.8)
 async def test_injection_resistance(adapter, trial_config):
-    population = await Attacks.xpia(...).execute_trials_async(
+    population = await execute_trials_async(
+        execution_factory=lambda: Attacks.xpia(...),
         adapter=adapter,
         n=trial_config.n,
         threshold=trial_config.threshold,
     )
-    assert population
+    assert population, population.summary
 ```
 
 The test controls population execution. CI can change its depth with `--rampart-trials=N` without changing the declared threshold.
@@ -64,9 +67,6 @@ def pytest_rampart_sinks(config):
 ```
 
 The JSON file contains aggregate statistics and per-result data that CI dashboards can consume. The hook is resolved on the controller, so it behaves identically in single-process and [`pytest-xdist`](xdist.md) CI runs. See [Registering Sinks](pytest-integration.md#pytest_rampart_sinks-hook).
-
-!!! warning "Deprecated"
-    The older `rampart_sinks` fixture still works but is deprecated and will be removed in `0.3.0`. Prefer the `pytest_rampart_sinks` hook above.
 
 ---
 

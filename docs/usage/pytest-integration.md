@@ -46,14 +46,17 @@ Declare the intended population size and correctness threshold for a test. The m
 **Why use it:** LLM-based agents are non-deterministic — the same prompt can produce different behavior across runs. A single test execution may not be representative. Trials address this by running the same test `n` times independently and reporting aggregate statistics. The `threshold` parameter lets you set an acceptable pass rate, acknowledging that 100% consistency may be unrealistic while still catching regressions. For example, `threshold=0.8` means "this test should pass at least 80% of the time" — if your agent suddenly drops below that, something changed.
 
 ```python
+from rampart import Probes, execute_trials_async
+
 @pytest.mark.trial(n=10, threshold=0.8)
 async def test_with_threshold(adapter, trial_config):
-    population = await execution.execute_trials_async(
+    population = await execute_trials_async(
+        execution_factory=lambda: Probes.behavior(...),
         adapter=adapter,
         n=trial_config.n,
         threshold=trial_config.threshold,
     )
-    assert population
+    assert population, population.summary
 ```
 
 | Parameter | Type | Default | Description |
@@ -82,58 +85,13 @@ def test_population(trial_config: TrialConfig):
 
 ---
 
-### `rampart_sinks`
-
-!!! warning "Deprecated"
-    The `rampart_sinks` fixture is deprecated and will be removed in `0.3.0`.
-    Use the [`pytest_rampart_sinks` hook](#pytest_rampart_sinks-hook) instead — it
-    behaves identically in single-process and `pytest-xdist` runs and accepts the
-    active `pytest.Config`. Defining the fixture now emits a `DeprecationWarning`.
-
-Define this **session-scoped** fixture in your `conftest.py` to configure report output:
-
-```python
-from pathlib import Path
-import pytest
-from rampart.reporting import JsonFileReportSink, ReportSink
-
-
-@pytest.fixture(scope="session")
-def rampart_sinks() -> list[ReportSink]:
-    return [JsonFileReportSink(output_dir=Path(".report"))]
-```
-
-If you don't define this fixture, RAMPART still prints the terminal summary — but no structured report files are written. You can provide multiple sinks:
-
-```python
-@pytest.fixture(scope="session")
-def rampart_sinks() -> list[ReportSink]:
-    return [
-        JsonFileReportSink(output_dir=Path(".report")),
-        MyCustomDatabaseSink(connection_string="..."),
-    ]
-```
-
-!!! warning "xdist compatibility"
-    Under [`pytest-xdist`](xdist.md), the controller process discovers fixture-based sinks by calling `rampart_sinks` directly. Fixtures that depend on other fixtures (e.g., `tmp_path_factory`, `request`) cannot be resolved on the controller and are skipped with a warning. Use a parameterless fixture or a module-level list to remain compatible:
-
-    ```python
-    # Resolved on the xdist controller (controller-only — single-process
-    # discovery needs the fixture form above, or the hook below)
-    rampart_sinks = [JsonFileReportSink(output_dir=Path(".report"))]
-    ```
-
-    For sinks that need configuration or dependencies, prefer the
-    `pytest_rampart_sinks` hook below — it is resolved on the controller and works
-    identically in single-process and parallel runs.
-
----
+## Registering Sinks
 
 ### `pytest_rampart_sinks` hook
 
-For sinks that need configuration — or to register sinks in a way that behaves
-identically in single-process and `pytest-xdist` runs — implement the
-`pytest_rampart_sinks` hook in your `conftest.py`:
+Implement the `pytest_rampart_sinks` hook in your `conftest.py` to register the
+report sinks RAMPART emits to. It behaves identically in single-process and
+`pytest-xdist` runs:
 
 ```python
 # conftest.py
@@ -150,10 +108,8 @@ The hook receives the active `pytest.Config`, so you can build
 sinks from CLI/ini options or environment variables. Multiple implementations are
 supported; RAMPART emits to the **union** of every returned sink.
 
-**Precedence:** when any `pytest_rampart_sinks` implementation exists, it is
-authoritative and the `rampart_sinks` fixture path is skipped entirely (so a
-project that defines both does not double-register). The fixture remains the
-single-process fallback when no hook implementation is present.
+If you don't register any sinks, RAMPART still prints the terminal summary — but
+no structured report files are written.
 
 ---
 
