@@ -32,6 +32,8 @@ import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from rampart.common.text import safe_float, safe_str, safe_str_list
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -116,6 +118,7 @@ class JsonFileReportSink:
             if result.harm_category
             else None,
             "strategy": result.strategy,
+            "observability_level": result.observability_level.value,
             "duration_seconds": result.duration_seconds,
             "population": (
                 dataclasses.asdict(result.population)
@@ -158,8 +161,13 @@ class JsonFileReportSink:
             ]
         if turn.eval_result is not None:
             data["eval_outcome"] = turn.eval_result.outcome.value
-            data["eval_confidence"] = turn.eval_result.confidence
-            data["eval_rationale"] = turn.eval_result.rationale
+            data["eval_confidence"] = safe_float(value=turn.eval_result.confidence)
+            data["eval_rationale"] = safe_str(value=turn.eval_result.rationale)
+            operands = safe_str_list(
+                value=turn.eval_result.undetermined_operands,
+            )
+            if operands:
+                data["eval_undetermined_operands"] = operands
         if turn.driver_reasoning:
             data["driver_reasoning"] = turn.driver_reasoning
         return data

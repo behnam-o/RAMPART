@@ -11,7 +11,7 @@ RAMPART exposes pytest options for trial depth and parallel-execution tuning. Ot
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--rampart-trials N` | marker `n` | Override `trial_config.n` for tests marked `@pytest.mark.trial`. The marker's `threshold` is unchanged. |
-| `--rampart-xdist-max-bytes` (CLI) / `rampart_xdist_max_bytes` (ini) | `67108864` (64 MB) | Maximum size of a worker's serialized result payload when running under [`pytest-xdist`](xdist.md). Workers exceeding the cap are recorded as incomplete in `TestRunReport.metadata`. |
+| `--rampart-xdist-max-bytes` (CLI) / `rampart_xdist_max_bytes` (ini) | `16777216` (16 MiB) | Maximum size of each serialized Result when running under [`pytest-xdist`](xdist.md). Oversized Results are replaced by truncation markers and recorded as incomplete in `TestRunReport.metadata`. |
 
 For example, `pytest --rampart-trials=50 -m trial` supplies `n=50` to each selected test's `trial_config` fixture while retaining its declared correctness threshold. Invalid or non-positive overrides are rejected during command-line parsing.
 
@@ -119,5 +119,3 @@ manifest.declares_tool("send_email")  # True
 manifest.get_tool("send_email")       # ToolDeclaration(name="send_email", ...)
 manifest.get_tool("nonexistent")      # None
 ```
-
-

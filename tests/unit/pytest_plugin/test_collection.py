@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 
 from rampart.core.execution import ExecutionEvent, ExecutionEventData
 from rampart.core.result import Result, SafetyStatus
+from rampart.core.types import ObservabilityLevel
 from rampart.pytest_plugin._collection import (
     ResultCollectionHandler,
     ResultCollector,
@@ -23,7 +24,11 @@ from rampart.pytest_plugin._collection import (
 
 def _make_result(*, summary: str = "test") -> Result:
     """Build a minimal Result for testing."""
-    return Result(status=SafetyStatus.SAFE, summary=summary)
+    return Result(
+        observability_level=ObservabilityLevel.RESPONSE_ONLY,
+        status=SafetyStatus.SAFE,
+        summary=summary,
+    )
 
 
 def _make_event_data(
@@ -82,7 +87,7 @@ class TestResultCollectionHandler:
                 result=result,
             )
 
-            await handler.on_event(event_data=event_data)
+            await handler.on_event_async(event_data=event_data)
 
             assert len(collector.results) == 1
             assert collector.results[0].summary == "captured"
@@ -96,7 +101,7 @@ class TestResultCollectionHandler:
             handler = ResultCollectionHandler()
             event_data = _make_event_data(event=ExecutionEvent.ON_PRE_EXECUTE)
 
-            await handler.on_event(event_data=event_data)
+            await handler.on_event_async(event_data=event_data)
 
             assert collector.results == []
         finally:
@@ -109,7 +114,7 @@ class TestResultCollectionHandler:
             handler = ResultCollectionHandler()
             event_data = _make_event_data(event=ExecutionEvent.ON_ERROR)
 
-            await handler.on_event(event_data=event_data)
+            await handler.on_event_async(event_data=event_data)
 
             assert collector.results == []
         finally:
@@ -123,7 +128,7 @@ class TestResultCollectionHandler:
             result=result,
         )
 
-        await handler.on_event(event_data=event_data)
+        await handler.on_event_async(event_data=event_data)
 
     async def test_noop_when_result_is_none_async(self) -> None:
         collector = ResultCollector()
@@ -135,7 +140,7 @@ class TestResultCollectionHandler:
                 result=None,
             )
 
-            await handler.on_event(event_data=event_data)
+            await handler.on_event_async(event_data=event_data)
 
             assert collector.results == []
         finally:
@@ -226,12 +231,12 @@ class TestGetActiveCollector:
         collector = ResultCollector()
         token = activate_collector(collector)
 
-        async def _body() -> None:
+        async def _body_async() -> None:
             await asyncio.sleep(0)
             record_result(result=_make_result(summary="child"))
 
         try:
-            await asyncio.create_task(_body())
+            await asyncio.create_task(_body_async())
             active = get_active_collector()
             assert active is collector
             assert len(active.results) == 1

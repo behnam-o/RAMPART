@@ -14,6 +14,7 @@ from rampart.core.execution import (
     ExecutionEvent,
     ExecutionEventData,
     ExecutionEventHandler,
+    execute_trials_async,
 )
 from rampart.core.manifest import AppManifest
 from rampart.core.result import PopulationRef, PopulationResult, Result, SafetyStatus
@@ -74,33 +75,36 @@ class _SuccessExecution(BaseExecution):
 
     async def _execute_async(self, *, adapter: AgentAdapter) -> Result:
         """Return a safe result."""
-        return Result(status=SafetyStatus.SAFE, summary="ok")
+        return Result(
+            observability_level=ObservabilityLevel.RESPONSE_ONLY,
+            status=SafetyStatus.SAFE,
+            summary="ok",
+        )
 
 
-class _ConcurrencyTrackingExecution(BaseExecution):
-    """Execution that records the number of overlapping trials."""
+class _OrderingExecution(BaseExecution):
+    """Execution that records when each trial starts and finishes."""
 
-    def __init__(self, *, expected_concurrency: int) -> None:
+    def __init__(self, *, index: int, events: list[str]) -> None:
         super().__init__()
-        self.active_count = 0
-        self.max_active_count = 0
-        self._expected_concurrency = expected_concurrency
-        self._release = asyncio.Event()
+        self.index = index
+        self.events = events
 
     @property
     def strategy_name(self) -> str:
         """Test strategy name."""
-        return "concurrency_tracking"
+        return "ordering"
 
     async def _execute_async(self, *, adapter: AgentAdapter) -> Result:
-        """Wait until the expected number of trials overlap."""
-        self.active_count += 1
-        self.max_active_count = max(self.max_active_count, self.active_count)
-        if self.active_count == self._expected_concurrency:
-            self._release.set()
-        await self._release.wait()
-        self.active_count -= 1
-        return Result(status=SafetyStatus.SAFE, summary="ok")
+        """Record trial boundaries around an async scheduling point."""
+        self.events.append(f"start-{self.index}")
+        await asyncio.sleep(0)
+        self.events.append(f"finish-{self.index}")
+        return Result(
+            observability_level=adapter.observability_profile,
+            status=SafetyStatus.SAFE,
+            summary="ok",
+        )
 
 
 class _InfraErrorExecution(BaseExecution):
@@ -148,7 +152,7 @@ class _RecordingHandler(ExecutionEventHandler):
     def __init__(self) -> None:
         self.events: list[ExecutionEventData] = []
 
-    async def on_event(self, *, event_data: ExecutionEventData) -> None:
+    async def on_event_async(self, *, event_data: ExecutionEventData) -> None:
         """Record the event data."""
         self.events.append(event_data)
 
@@ -156,13 +160,13 @@ class _RecordingHandler(ExecutionEventHandler):
 class _BrokenHandler(ExecutionEventHandler):
     """Handler that always raises."""
 
-    async def on_event(self, *, event_data: ExecutionEventData) -> None:
+    async def on_event_async(self, *, event_data: ExecutionEventData) -> None:
         """Raise unconditionally to test handler safety."""
         raise ValueError("handler broke")
 
 
 class TestBaseExecutionLifecycle:
-    async def test_fires_pre_and_post_execute(self) -> None:
+    async def test_fires_pre_and_post_execute_async(self) -> None:
         handler = _RecordingHandler()
         execution = _SuccessExecution(event_handlers=[handler])
         adapter = _StubAdapter()
@@ -175,7 +179,7 @@ class TestBaseExecutionLifecycle:
         assert handler.events[1].event is ExecutionEvent.ON_POST_EXECUTE
         assert handler.events[1].result is result
 
-    async def test_post_execute_has_elapsed_time(self) -> None:
+    async def test_post_execute_has_elapsed_time_async(self) -> None:
         handler = _RecordingHandler()
         execution = _SuccessExecution(event_handlers=[handler])
 
@@ -186,10 +190,28 @@ class TestBaseExecutionLifecycle:
 
 
 class TestExecuteTrials:
-    async def test_returns_population_result_async(self) -> None:
-        execution = _SuccessExecution()
+    async def test_factory_creates_a_distinct_execution_per_trial_async(self) -> None:
+        executions: list[BaseExecution] = []
 
-        population = await execution.execute_trials_async(
+        def create_execution() -> BaseExecution:
+            execution = _SuccessExecution()
+            executions.append(execution)
+            return execution
+
+        population = await execute_trials_async(
+            execution_factory=create_execution,
+            adapter=_StubAdapter(),
+            n=3,
+            threshold=1.0,
+        )
+
+        assert len(executions) == 3
+        assert len({id(execution) for execution in executions}) == 3
+        assert population.executed_count == 3
+
+    async def test_returns_population_result_async(self) -> None:
+        population = await execute_trials_async(
+            execution_factory=_SuccessExecution,
             adapter=_StubAdapter(),
             n=3,
             threshold=0.8,
@@ -201,9 +223,9 @@ class TestExecuteTrials:
 
     async def test_runs_normal_lifecycle_for_every_trial_async(self) -> None:
         handler = _RecordingHandler()
-        execution = _SuccessExecution(event_handlers=[handler])
 
-        population = await execution.execute_trials_async(
+        population = await execute_trials_async(
+            execution_factory=lambda: _SuccessExecution(event_handlers=[handler]),
             adapter=_StubAdapter(),
             n=3,
             threshold=1.0,
@@ -215,26 +237,34 @@ class TestExecuteTrials:
             ExecutionEvent.ON_POST_EXECUTE,
         ] * 3
 
-    async def test_runs_trials_with_opt_in_bounded_concurrency_async(self) -> None:
-        execution = _ConcurrencyTrackingExecution(expected_concurrency=2)
+    async def test_runs_trials_sequentially_async(self) -> None:
+        events: list[str] = []
 
-        population = await execution.execute_trials_async(
+        def create_execution() -> BaseExecution:
+            return _OrderingExecution(index=len(events) // 2, events=events)
+
+        population = await execute_trials_async(
+            execution_factory=create_execution,
             adapter=_StubAdapter(),
-            n=4,
+            n=3,
             threshold=1.0,
-            max_concurrency=2,
         )
 
-        assert execution.max_active_count == 2
-        refs = [result.population for result in population.results]
-        assert all(ref is not None for ref in refs)
-        assert [ref.index for ref in refs if ref is not None] == [0, 1, 2, 3]
+        assert events == [
+            "start-0",
+            "finish-0",
+            "start-1",
+            "finish-1",
+            "start-2",
+            "finish-2",
+        ]
+        assert population.executed_count == 3
 
     async def test_attaches_population_ref_before_post_execute_async(self) -> None:
         handler = _RecordingHandler()
-        execution = _SuccessExecution(event_handlers=[handler])
 
-        population = await execution.execute_trials_async(
+        population = await execute_trials_async(
+            execution_factory=lambda: _SuccessExecution(event_handlers=[handler]),
             adapter=_StubAdapter(),
             n=3,
             threshold=0.8,
@@ -256,14 +286,14 @@ class TestExecuteTrials:
         assert post_refs == refs
 
     async def test_separate_populations_have_distinct_ids_async(self) -> None:
-        execution = _SuccessExecution()
-
-        first = await execution.execute_trials_async(
+        first = await execute_trials_async(
+            execution_factory=_SuccessExecution,
             adapter=_StubAdapter(),
             n=1,
             threshold=1.0,
         )
-        second = await execution.execute_trials_async(
+        second = await execute_trials_async(
+            execution_factory=_SuccessExecution,
             adapter=_StubAdapter(),
             n=1,
             threshold=1.0,
@@ -277,9 +307,11 @@ class TestExecuteTrials:
 
     async def test_error_result_has_population_ref_on_post_execute_async(self) -> None:
         handler = _RecordingHandler()
-        execution = _InfraErrorExecution(event_handlers=[handler])
 
-        population = await execution.execute_trials_async(
+        population = await execute_trials_async(
+            execution_factory=lambda: _InfraErrorExecution(
+                event_handlers=[handler],
+            ),
             adapter=_StubAdapter(),
             n=1,
             threshold=1.0,
@@ -294,10 +326,9 @@ class TestExecuteTrials:
         assert post.result.population is result.population
 
     async def test_rejects_non_positive_trial_count_async(self) -> None:
-        execution = _SuccessExecution()
-
         with pytest.raises(ValueError, match="n must be greater"):
-            await execution.execute_trials_async(
+            await execute_trials_async(
+                execution_factory=_SuccessExecution,
                 adapter=_StubAdapter(),
                 n=0,
                 threshold=0.8,
@@ -305,10 +336,9 @@ class TestExecuteTrials:
 
     @pytest.mark.parametrize("n", [True, 1.5, "3"])
     async def test_rejects_invalid_trial_count_type_async(self, n: object) -> None:
-        execution = _SuccessExecution()
-
         with pytest.raises(TypeError, match="n must be a non-boolean integer"):
-            await execution.execute_trials_async(
+            await execute_trials_async(
+                execution_factory=_SuccessExecution,
                 adapter=_StubAdapter(),
                 n=n,  # ty: ignore[invalid-argument-type]
                 threshold=0.8,
@@ -316,10 +346,12 @@ class TestExecuteTrials:
 
     async def test_rejects_invalid_threshold_before_execution_async(self) -> None:
         handler = _RecordingHandler()
-        execution = _SuccessExecution(event_handlers=[handler])
 
         with pytest.raises(ValueError, match="threshold must be between"):
-            await execution.execute_trials_async(
+            await execute_trials_async(
+                execution_factory=lambda: _SuccessExecution(
+                    event_handlers=[handler],
+                ),
                 adapter=_StubAdapter(),
                 n=3,
                 threshold=1.1,
@@ -327,37 +359,18 @@ class TestExecuteTrials:
 
         assert handler.events == []
 
-    @pytest.mark.parametrize("max_concurrency", [True, 1.5, "2"])
-    async def test_rejects_invalid_max_concurrency_type_async(
-        self,
-        max_concurrency: object,
-    ) -> None:
-        execution = _SuccessExecution()
-
-        with pytest.raises(
-            TypeError,
-            match="max_concurrency must be a non-boolean integer",
-        ):
-            await execution.execute_trials_async(
-                adapter=_StubAdapter(),
-                n=3,
-                threshold=0.8,
-                max_concurrency=max_concurrency,  # ty: ignore[invalid-argument-type]
-            )
-
-    async def test_rejects_non_positive_max_concurrency_async(self) -> None:
-        execution = _SuccessExecution()
-
-        with pytest.raises(ValueError, match="max_concurrency must be greater"):
-            await execution.execute_trials_async(
-                adapter=_StubAdapter(),
-                n=3,
-                threshold=0.8,
-                max_concurrency=0,
-            )
-
 
 class TestPopulationPublicExports:
+    def test_execute_trials_exported_from_rampart(self) -> None:
+        from rampart import execute_trials_async as top_level_execute_trials_async
+
+        assert top_level_execute_trials_async is execute_trials_async
+
+    def test_execute_trials_exported_from_rampart_core(self) -> None:
+        from rampart.core import execute_trials_async as core_execute_trials_async
+
+        assert core_execute_trials_async is execute_trials_async
+
     def test_exported_from_rampart(self) -> None:
         from rampart import PopulationResult as TopLevelPopulationResult
 
@@ -380,7 +393,7 @@ class TestPopulationPublicExports:
 
 
 class TestInfrastructureErrorHandling:
-    async def test_produces_error_result(self) -> None:
+    async def test_produces_error_result_async(self) -> None:
         execution = _InfraErrorExecution()
         adapter = _StubAdapter()
 
@@ -390,21 +403,21 @@ class TestInfrastructureErrorHandling:
         assert result.status is SafetyStatus.ERROR
         assert "SharePoint returned 503" in result.summary
 
-    async def test_error_result_has_strategy(self) -> None:
+    async def test_error_result_has_strategy_async(self) -> None:
         execution = _InfraErrorExecution()
 
         result = await execution.execute_async(adapter=_StubAdapter())
 
         assert result.strategy == "infra_error"
 
-    async def test_error_result_has_observability_level(self) -> None:
+    async def test_error_result_has_observability_level_async(self) -> None:
         execution = _InfraErrorExecution()
 
         result = await execution.execute_async(adapter=_StubAdapter())
 
         assert result.observability_level is ObservabilityLevel.TOOL_ONLY
 
-    async def test_error_result_has_metadata(self) -> None:
+    async def test_error_result_has_metadata_async(self) -> None:
         execution = _InfraErrorExecution()
 
         result = await execution.execute_async(adapter=_StubAdapter())
@@ -412,7 +425,7 @@ class TestInfrastructureErrorHandling:
         assert result.metadata["error"] == "SharePoint returned 503"
         assert result.metadata["error_type"] == "InfrastructureError"
 
-    async def test_fires_on_error_and_post_execute(self) -> None:
+    async def test_fires_on_error_and_post_execute_async(self) -> None:
         handler = _RecordingHandler()
         execution = _InfraErrorExecution(event_handlers=[handler])
 
@@ -424,7 +437,7 @@ class TestInfrastructureErrorHandling:
 
 
 class TestGenericErrorHandling:
-    async def test_produces_error_result(self) -> None:
+    async def test_produces_error_result_async(self) -> None:
         execution = _GenericErrorExecution()
 
         result = await execution.execute_async(adapter=_StubAdapter())
@@ -433,14 +446,14 @@ class TestGenericErrorHandling:
         assert result.status is SafetyStatus.ERROR
         assert "unexpected failure" in result.summary
 
-    async def test_error_result_has_strategy(self) -> None:
+    async def test_error_result_has_strategy_async(self) -> None:
         execution = _GenericErrorExecution()
 
         result = await execution.execute_async(adapter=_StubAdapter())
 
         assert result.strategy == "generic_error"
 
-    async def test_error_result_has_metadata(self) -> None:
+    async def test_error_result_has_metadata_async(self) -> None:
         execution = _GenericErrorExecution()
 
         result = await execution.execute_async(adapter=_StubAdapter())
@@ -448,7 +461,7 @@ class TestGenericErrorHandling:
         assert result.metadata["error"] == "unexpected failure"
         assert result.metadata["error_type"] == "RuntimeError"
 
-    async def test_fires_on_error_and_post_execute(self) -> None:
+    async def test_fires_on_error_and_post_execute_async(self) -> None:
         handler = _RecordingHandler()
         execution = _GenericErrorExecution(event_handlers=[handler])
 
@@ -458,7 +471,7 @@ class TestGenericErrorHandling:
         assert ExecutionEvent.ON_ERROR in event_types
         assert ExecutionEvent.ON_POST_EXECUTE in event_types
 
-    async def test_on_error_contains_exception(self) -> None:
+    async def test_on_error_contains_exception_async(self) -> None:
         handler = _RecordingHandler()
         execution = _GenericErrorExecution(event_handlers=[handler])
 
@@ -471,7 +484,7 @@ class TestGenericErrorHandling:
 
 
 class TestHandlerSafety:
-    async def test_broken_handler_does_not_abort_execution(self) -> None:
+    async def test_broken_handler_does_not_abort_execution_async(self) -> None:
         broken = _BrokenHandler()
         recorder = _RecordingHandler()
         execution = _SuccessExecution(event_handlers=[broken, recorder])
@@ -483,14 +496,14 @@ class TestHandlerSafety:
 
 
 class TestDefaultHandlerFactory:
-    async def test_execution_works_without_factory(self) -> None:
+    async def test_execution_works_without_factory_async(self) -> None:
         execution = _SuccessExecution()
 
         result = await execution.execute_async(adapter=_StubAdapter())
 
         assert result.safe is True
 
-    async def test_factory_handlers_are_prepended(self) -> None:
+    async def test_factory_handlers_are_prepended_async(self) -> None:
         from rampart.core.execution import (
             clear_default_handler_factory,
             register_default_handler_factory,
@@ -516,7 +529,7 @@ class TestDefaultHandlerFactory:
 
 
 class TestDriverErrorHandling:
-    async def test_produces_error_result(self) -> None:
+    async def test_produces_error_result_async(self) -> None:
         execution = _DriverErrorExecution()
         adapter = _StubAdapter()
 
@@ -526,14 +539,14 @@ class TestDriverErrorHandling:
         assert result.status is SafetyStatus.ERROR
         assert "LLM returned garbage" in result.summary
 
-    async def test_error_result_has_strategy(self) -> None:
+    async def test_error_result_has_strategy_async(self) -> None:
         execution = _DriverErrorExecution()
 
         result = await execution.execute_async(adapter=_StubAdapter())
 
         assert result.strategy == "driver_error"
 
-    async def test_error_result_has_metadata(self) -> None:
+    async def test_error_result_has_metadata_async(self) -> None:
         execution = _DriverErrorExecution()
 
         result = await execution.execute_async(adapter=_StubAdapter())
@@ -541,7 +554,7 @@ class TestDriverErrorHandling:
         assert result.metadata["error"] == "LLM returned garbage"
         assert result.metadata["error_type"] == "DriverError"
 
-    async def test_fires_on_error_and_post_execute(self) -> None:
+    async def test_fires_on_error_and_post_execute_async(self) -> None:
         handler = _RecordingHandler()
         execution = _DriverErrorExecution(event_handlers=[handler])
 
@@ -553,7 +566,21 @@ class TestDriverErrorHandling:
 
 
 class TestEvaluateTurnAsync:
-    async def test_returns_turn_with_eval_result(self) -> None:
+    async def test_observability_level_is_required_async(self) -> None:
+        from unittest.mock import AsyncMock
+
+        from rampart.core.execution import evaluate_turn_async
+
+        with pytest.raises(TypeError, match="observability_level"):
+            await evaluate_turn_async(  # ty: ignore[missing-argument]
+                evaluator=AsyncMock(),
+                history=[],
+                request=Request(prompt="hello"),
+                response=Response(text="world"),
+                turn_number=0,
+            )
+
+    async def test_returns_turn_with_eval_result_async(self) -> None:
         from unittest.mock import AsyncMock
 
         from rampart.core.execution import evaluate_turn_async
@@ -570,6 +597,7 @@ class TestEvaluateTurnAsync:
         )
 
         turn = await evaluate_turn_async(
+            observability_level=ObservabilityLevel.TOOL_AND_SIDE_EFFECTS,
             evaluator=evaluator,
             history=[],
             request=Request(prompt="hello"),
@@ -583,7 +611,7 @@ class TestEvaluateTurnAsync:
         assert turn.response.text == "world"
         assert turn.turn_number == 0
 
-    async def test_includes_history_in_context(self) -> None:
+    async def test_includes_history_in_context_async(self) -> None:
         from unittest.mock import AsyncMock
 
         from rampart.core.execution import evaluate_turn_async
@@ -610,6 +638,7 @@ class TestEvaluateTurnAsync:
         )
 
         await evaluate_turn_async(
+            observability_level=ObservabilityLevel.TOOL_AND_SIDE_EFFECTS,
             evaluator=evaluator,
             history=[history_turn],
             request=Request(prompt="current"),
@@ -623,7 +652,35 @@ class TestEvaluateTurnAsync:
         assert captured_context.turns[0].request.prompt == "prev"
         assert captured_context.turns[1].request.prompt == "current"
 
-    async def test_preserves_driver_reasoning(self) -> None:
+    async def test_passes_observability_level_to_context_async(self) -> None:
+        from unittest.mock import AsyncMock
+
+        from rampart.core.execution import evaluate_turn_async
+        from rampart.core.types import EvalOutcome, Request, Response
+
+        captured_context = None
+
+        def capture_eval(*, context: EvalContext) -> EvalResult:
+            nonlocal captured_context
+            captured_context = context
+            return EvalResult(outcome=EvalOutcome.NOT_DETECTED)
+
+        evaluator = AsyncMock()
+        evaluator.evaluate_async.side_effect = capture_eval
+
+        await evaluate_turn_async(
+            evaluator=evaluator,
+            history=[],
+            request=Request(prompt="hello"),
+            response=Response(text="world"),
+            turn_number=0,
+            observability_level=ObservabilityLevel.RESPONSE_ONLY,
+        )
+
+        assert captured_context is not None
+        assert captured_context.observability_level is ObservabilityLevel.RESPONSE_ONLY
+
+    async def test_preserves_driver_reasoning_async(self) -> None:
         from unittest.mock import AsyncMock
 
         from rampart.core.execution import evaluate_turn_async
@@ -633,6 +690,7 @@ class TestEvaluateTurnAsync:
         evaluator.evaluate_async.return_value = EvalResult(outcome=EvalOutcome.DETECTED)
 
         turn = await evaluate_turn_async(
+            observability_level=ObservabilityLevel.TOOL_AND_SIDE_EFFECTS,
             evaluator=evaluator,
             history=[],
             request=Request(prompt="p"),

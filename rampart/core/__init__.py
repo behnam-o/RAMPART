@@ -17,6 +17,7 @@ from rampart.core.execution import (
     ExecutionEventHandler,
     ExecutionHandlerFactory,
     evaluate_turn_async,
+    execute_trials_async,
 )
 from rampart.core.injection import InjectionHandle, Surface
 from rampart.core.llm import LLMConfig
@@ -87,6 +88,7 @@ __all__ = [
     "ToolDeclaration",
     "Turn",
     "evaluate_turn_async",
+    "execute_trials_async",
     "resolve_as_attack",
     "resolve_as_probe",
 ]

@@ -17,7 +17,7 @@ sequenceDiagram
 
     Test->>Surface: inject(payload) → handle
     Note over Surface: Payload placed in data source
-    Test->>Surface: handle.wait_until_ready()
+    Test->>Surface: handle.wait_until_ready_async()
     Test->>Agent: session.send_async("Summarize reports")
     Agent-->>Test: Response (text + tool_calls)
     Test->>Eval: evaluate_async(context)
@@ -28,7 +28,7 @@ sequenceDiagram
 **Phases:**
 
 1. **Inject** — Place payloads into the agent's data sources via surfaces. Each `surface.inject(payload)` returns an [`InjectionHandle`][rampart.core.injection.InjectionHandle].
-2. **Wait** — Handles call `wait_until_ready()` to allow indexing. Runs concurrently for multiple surfaces.
+2. **Wait** — Handles call `wait_until_ready_async()` to allow indexing. Runs concurrently for multiple surfaces.
 3. **Trigger** — Send benign prompts that cause the agent to retrieve the injected content. Triggers are never adversarial — the attack is in the payload, not the prompt.
 4. **Evaluate** — Check each turn for the attack objective. Early-stops on detection.
 5. **Clean up** — Remove injected content. Guaranteed via `AsyncExitStack`, even on exceptions.
@@ -144,6 +144,8 @@ evaluator = ~ResponseContains(lambda text: "I can't" in text or "I cannot" in te
 
 Place the cheaper evaluator on the left side of `|` — it short-circuits if the left operand detects.
 
+The `&` above asks whether both happened, so one condition that definitively did not happen settles the result even if the adapter could not observe the other. Use `|` when either condition on its own would count as the attack succeeding. When the adapter does not report the channel the left condition needs, the result records that on [`EvalResult`][rampart.core.types.EvalResult]. Reversing those two operands records nothing, because a `NOT_DETECTED` left operand short-circuits `&` before the other one runs. See the note on undetermined operands in [Authoring Tests](../usage/authoring-tests.md#composing-evaluators).
+
 ### LLMDriver for Adaptive Triggers
 
 For multi-turn attacks where the trigger conversation adapts based on agent responses, use [`LLMDriver`][rampart.drivers.llm.LLMDriver] instead of a static string:
@@ -225,5 +227,7 @@ This only fires when all three conditions hold:
 1. The initial verdict is `SAFE`
 2. The adapter's `observability_profile` is `RESPONSE_ONLY`
 3. Zero tool calls were observed
+
+It is a backstop for evaluators that cannot say up front what evidence they need, such as `LLMJudge`, where the answer depends on the objective. `ToolCalled` and `SideEffectOccurred` return `UNDETERMINED` themselves, so on their own they do not reach this check as `SAFE`. A composition still can, so the backstop stays.
 
 

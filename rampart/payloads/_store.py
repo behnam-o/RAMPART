@@ -143,6 +143,14 @@ class PayloadStore:
             )
             raise FileNotFoundError(msg)
 
+        collection_dir = payloads_path.parent
+        artifacts_dir = collection_dir / "artifacts"
+        self._ensure_within_directory(
+            path=artifacts_dir,
+            directory=collection_dir,
+            description="artifacts directory",
+        )
+
         payloads: list[Payload] = []
         with payloads_path.open("r", encoding="utf-8") as f:
             for raw_line in f:
@@ -151,7 +159,7 @@ class PayloadStore:
                     continue
                 payload = self._deserialize(
                     data=json.loads(line),
-                    collection_dir=payloads_path.parent,
+                    artifacts_dir=artifacts_dir,
                 )
                 if format_filter is None or payload.format == format_filter:
                     payloads.append(payload)
@@ -342,29 +350,95 @@ class PayloadStore:
         return f"artifacts/{filename}"
 
     @staticmethod
+    def _ensure_within_directory(
+        *,
+        path: Path,
+        directory: Path,
+        description: str,
+    ) -> None:
+        """Raise if a resolved path escapes a required directory.
+
+        Raises:
+            ValueError: If the resolved path is outside the directory.
+        """
+        resolved_path = path.resolve(strict=False)
+        resolved_directory = directory.resolve(strict=False)
+        if not resolved_path.is_relative_to(resolved_directory):
+            msg = f"Invalid {description}: {path!s} escapes {directory!s}"
+            raise ValueError(msg)
+
+    @staticmethod
+    def _validate_artifact_reference(artifact: object) -> Path:
+        """Validate and normalize a serialized artifact reference.
+
+        Returns:
+            Path: The artifact path relative to the artifacts directory.
+
+        Raises:
+            ValueError: If the reference is not a relative path under artifacts/.
+        """
+        msg = f"Invalid artifact path: {artifact!r}. Must be under artifacts/."
+        is_string_reference = isinstance(artifact, str)
+        if not is_string_reference:
+            raise ValueError(msg)
+        artifact_path = Path(artifact)
+        if artifact_path.is_absolute() or ".." in artifact_path.parts:
+            raise ValueError(msg)
+        try:
+            artifact_relative = artifact_path.relative_to("artifacts")
+        except ValueError as exc:
+            raise ValueError(msg) from exc
+
+        if artifact_relative == Path():
+            raise ValueError(msg)
+        return artifact_relative
+
+    @staticmethod
+    def _resolve_artifact_path(*, artifacts_dir: Path, artifact: object) -> Path:
+        """Resolve a serialized artifact path inside the artifacts directory.
+
+        Returns:
+            Path: The validated artifact path.
+
+        Raises:
+            ValueError: If the artifact reference escapes the artifacts directory.
+        """
+        artifact_relative = PayloadStore._validate_artifact_reference(artifact)
+        resolved = artifacts_dir / artifact_relative
+        PayloadStore._ensure_within_directory(
+            path=resolved,
+            directory=artifacts_dir,
+            description="artifact path",
+        )
+        return resolved
+
+    @staticmethod
     def _deserialize(
         *,
         data: dict[str, Any],
-        collection_dir: Path,
+        artifacts_dir: Path,
     ) -> Payload:
         """Deserialize a JSON record back to a Payload.
 
         Args:
             data (dict[str, Any]): JSON record from JSONL.
-            collection_dir (Path): Collection directory for resolving
-                artifact paths.
+            artifacts_dir (Path): Directory for resolving artifact paths.
 
         Returns:
             Payload: Reconstituted Payload.
 
         Raises:
             FileNotFoundError: If a referenced artifact is missing.
+            ValueError: If a referenced artifact path is invalid.
         """
         fmt = PayloadFormat(data["format"])
 
         artifact: Path | None = None
         if "artifact" in data:
-            artifact_path = collection_dir / data["artifact"]
+            artifact_path = PayloadStore._resolve_artifact_path(
+                artifacts_dir=artifacts_dir,
+                artifact=data["artifact"],
+            )
             if not artifact_path.exists():
                 msg = f"Missing artifact: {artifact_path}"
                 raise FileNotFoundError(msg)

@@ -10,7 +10,6 @@ dispatch, infrastructure error handling).
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 import uuid
@@ -20,9 +19,17 @@ from enum import Enum
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from rampart.core.result import PopulationRef, PopulationResult, Result, SafetyStatus
-from rampart.core.types import EvalContext, Request, Response, Turn
+from rampart.core.types import (
+    EvalContext,
+    ObservabilityLevel,
+    Request,
+    Response,
+    Turn,
+)
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from rampart.core.adapter import AgentAdapter
     from rampart.core.evaluator import Evaluator
     from rampart.core.manifest import AppManifest
@@ -75,7 +82,7 @@ class ExecutionEventHandler(ABC):
     """
 
     @abstractmethod
-    async def on_event(self, *, event_data: ExecutionEventData) -> None:
+    async def on_event_async(self, *, event_data: ExecutionEventData) -> None:
         """Handle an execution lifecycle event.
 
         Args:
@@ -241,81 +248,6 @@ class BaseExecution(ABC):
             population=None,
         )
 
-    async def execute_trials_async(
-        self,
-        *,
-        adapter: AgentAdapter,
-        n: int,
-        threshold: float,
-        max_concurrency: int = 1,
-    ) -> PopulationResult:
-        """Execute a population of independent trials.
-
-        Each trial uses the normal ``execute_async`` lifecycle, including
-        event dispatch and result collection. The returned aggregate provides
-        the single logical verdict that callers should assert. Execution
-        strategies are responsible for creating a fresh agent session during
-        each call to ``execute_async``. Trials run sequentially by default;
-        set ``max_concurrency`` greater than 1 to opt into bounded concurrency.
-
-        Note: Trials are only statistically meaningful when the adapter is stateless
-        across sessions. A stateful adapter (e.g. memory-backed) makes pass_rate an
-        unreliable estimate.
-
-        Args:
-            adapter (AgentAdapter): The agent to test.
-            n (int): Number of independent trials to execute.
-            threshold (float): Required safe-result rate from 0.0 to 1.0.
-            max_concurrency (int): Maximum number of concurrent trials.
-                Defaults to 1.
-
-        Returns:
-            PopulationResult: Aggregate verdict and individual trial results.
-
-        Raises:
-            TypeError: If n or max_concurrency is not a non-boolean integer.
-            ValueError: If n or max_concurrency is less than 1, or threshold
-                is outside [0.0, 1.0].
-        """
-        if not isinstance(n, int) or isinstance(n, bool):
-            msg = "n must be a non-boolean integer"
-            raise TypeError(msg)
-        if n < 1:
-            msg = "n must be greater than or equal to 1"
-            raise ValueError(msg)
-        if not 0.0 <= threshold <= 1.0:
-            msg = "threshold must be between 0.0 and 1.0"
-            raise ValueError(msg)
-        if not isinstance(max_concurrency, int) or isinstance(max_concurrency, bool):
-            msg = "max_concurrency must be a non-boolean integer"
-            raise TypeError(msg)
-        if max_concurrency < 1:
-            msg = "max_concurrency must be greater than or equal to 1"
-            raise ValueError(msg)
-
-        population_id = uuid.uuid4().hex
-        semaphore = asyncio.Semaphore(max_concurrency)
-        results = await asyncio.gather(
-            *(
-                self._execute_trial_async(
-                    adapter=adapter,
-                    population=PopulationRef(
-                        id=population_id,
-                        index=index,
-                        size=n,
-                        threshold=threshold,
-                    ),
-                    semaphore=semaphore,
-                )
-                for index in range(n)
-            ),
-        )
-
-        return PopulationResult(
-            results=results,
-            threshold=threshold,
-        )
-
     @abstractmethod
     async def _execute_async(self, *, adapter: AgentAdapter) -> Result:
         """Core execution logic implemented by each strategy.
@@ -340,7 +272,7 @@ class BaseExecution(ABC):
             Result: The execution result after lifecycle processing.
         """
         start = time.monotonic()
-        await self._fire(
+        await self._fire_async(
             ExecutionEvent.ON_PRE_EXECUTE,
             adapter=adapter,
             elapsed=0.0,
@@ -356,7 +288,7 @@ class BaseExecution(ABC):
                 self.strategy_name,
             )
 
-            await self._fire(
+            await self._fire_async(
                 ExecutionEvent.ON_ERROR,
                 adapter=adapter,
                 elapsed=time.monotonic() - start,
@@ -374,7 +306,7 @@ class BaseExecution(ABC):
         elapsed = time.monotonic() - start
         result.duration_seconds = elapsed
         result.population = population
-        await self._fire(
+        await self._fire_async(
             ExecutionEvent.ON_POST_EXECUTE,
             adapter=adapter,
             elapsed=elapsed,
@@ -382,25 +314,7 @@ class BaseExecution(ABC):
         )
         return result
 
-    async def _execute_trial_async(
-        self,
-        *,
-        adapter: AgentAdapter,
-        population: PopulationRef,
-        semaphore: asyncio.Semaphore,
-    ) -> Result:
-        """Execute one population trial within the concurrency bound.
-
-        Returns:
-            Result: The completed trial result.
-        """
-        async with semaphore:
-            return await self._execute_once_async(
-                adapter=adapter,
-                population=population,
-            )
-
-    async def _fire(
+    async def _fire_async(
         self,
         event: ExecutionEvent,
         *,
@@ -430,7 +344,7 @@ class BaseExecution(ABC):
         )
         for handler in self._handlers:
             try:
-                await handler.on_event(event_data=event_data)
+                await handler.on_event_async(event_data=event_data)
             except Exception:
                 logger.warning(
                     "ExecutionEventHandler %s raised on %s — ignored.",
@@ -440,6 +354,77 @@ class BaseExecution(ABC):
                 )
 
 
+async def execute_trials_async(
+    *,
+    execution_factory: Callable[[], BaseExecution],
+    adapter: AgentAdapter,
+    n: int,
+    threshold: float,
+) -> PopulationResult:
+    """Execute trials sequentially using a fresh execution from the factory.
+
+    Args:
+        execution_factory (Callable[[], BaseExecution]): Creates one complete
+            execution, including trial-scoped dependencies, per trial.
+        adapter (AgentAdapter): The agent to test.
+        n (int): Number of independent trials to execute.
+        threshold (float): Required safe-result rate from 0.0 to 1.0.
+
+    Returns:
+        PopulationResult: Aggregate verdict and individual trial results.
+
+    Raises:
+        TypeError: If n is not a non-boolean integer.
+        ValueError: If n is less than 1 or threshold is outside [0.0, 1.0].
+    """
+    _validate_trial_parameters(
+        n=n,
+        threshold=threshold,
+    )
+    population_id = uuid.uuid4().hex
+    results: list[Result] = []
+    for index in range(n):
+        execution = execution_factory()
+        results.append(
+            await BaseExecution._execute_once_async(  # ruff: ignore[private-member-access]
+                execution,
+                adapter=adapter,
+                population=PopulationRef(
+                    id=population_id,
+                    index=index,
+                    size=n,
+                    threshold=threshold,
+                ),
+            )
+        )
+    return PopulationResult(
+        results=results,
+        threshold=threshold,
+    )
+
+
+def _validate_trial_parameters(
+    *,
+    n: int,
+    threshold: float,
+) -> None:
+    """Validate trial population parameters.
+
+    Raises:
+        TypeError: If n is not a non-boolean integer.
+        ValueError: If n is less than 1 or threshold is outside [0.0, 1.0].
+    """
+    if not isinstance(n, int) or isinstance(n, bool):
+        msg = "n must be a non-boolean integer"
+        raise TypeError(msg)
+    if n < 1:
+        msg = "n must be greater than or equal to 1"
+        raise ValueError(msg)
+    if not 0.0 <= threshold <= 1.0:
+        msg = "threshold must be between 0.0 and 1.0"
+        raise ValueError(msg)
+
+
 async def evaluate_turn_async(
     *,
     evaluator: Evaluator,
@@ -447,6 +432,7 @@ async def evaluate_turn_async(
     request: Request,
     response: Response,
     turn_number: int,
+    observability_level: ObservabilityLevel,
     driver_reasoning: str = "",
     manifest: AppManifest | None = None,
 ) -> Turn:
@@ -462,6 +448,10 @@ async def evaluate_turn_async(
         request: What was sent to the agent this turn.
         response: What the agent returned this turn.
         turn_number: Position in the conversation (0-indexed).
+        observability_level: What the adapter can observe. Required, so
+            that evaluators can tell missing evidence apart from an
+            evidence channel the adapter does not report. Execution
+            strategies pass ``adapter.observability_profile``.
         driver_reasoning: Why the driver chose this request.
         manifest: The agent's declared capabilities.
 
@@ -475,6 +465,10 @@ async def evaluate_turn_async(
         driver_reasoning=driver_reasoning,
     )
     result = await evaluator.evaluate_async(
-        context=EvalContext(turns=[*history, provisional], manifest=manifest),
+        context=EvalContext(
+            turns=[*history, provisional],
+            manifest=manifest,
+            observability_level=observability_level,
+        ),
     )
     return replace(provisional, eval_result=result)

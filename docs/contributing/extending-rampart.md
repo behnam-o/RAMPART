@@ -99,6 +99,7 @@ class MyAttackExecution(BaseExecution):
                     turn_number=turn_index,
                     driver_reasoning=decision.reasoning,
                     manifest=adapter.manifest,
+                    observability_level=adapter.observability_profile,
                 )
                 turns.append(turn)
 
@@ -124,6 +125,7 @@ Key points:
 - **Implement `_execute_async`** — this is your strategy-specific logic
 - **Implement `strategy_name`** — a short identifier used in `Result.strategy`
 - **Use `resolve_as_attack`** — this maps evaluator outcomes to safety verdicts with attack semantics (detected = UNSAFE)
+- **Pass `observability_level`** so evaluators can tell missing evidence apart from an evidence channel the adapter does not report. It is required on both `evaluate_turn_async` and `Result`, so leaving it out is a `TypeError` rather than a wrong assumption buried in a report.
 - **Don't wrap `_execute_async` in a broad `try/except`** — `BaseExecution.execute_async` already catches every exception from `_execute_async` and converts it to a `SafetyStatus.ERROR` result.
 
 ### 2. Add a Factory Method to `Attacks`
@@ -337,7 +339,7 @@ For the basic protocol skeleton, see [Implementing Surfaces](../usage/authoring-
 
 - **`Surface.inject` does not activate** — it only prepares the handle. Activation happens when an execution strategy enters the handle as an async context manager.
 - **`__aexit__` must be idempotent and must not raise** — cleanup runs even on exceptions, and a failing cleanup must not mask the original error.
-- **`wait_until_ready` should bound itself** with `TimeoutError` rather than block indefinitely. For simple delay-based waits, call `sleep_until_ready` from `rampart.core.injection`.
+- **`wait_until_ready_async` should bound itself** with `TimeoutError` rather than block indefinitely. For simple delay-based waits, call `sleep_until_ready_async` from `rampart.core.injection`.
 - **Raise `InfrastructureError`** for transient, external failures (timeouts, rate limits, service outages). It's the documented convention for surfaces and adapters to signal "not a safety signal" — `BaseExecution` catches all exceptions and produces an `ERROR` result either way, but the exception type is preserved in metadata for triage.
 
 For a complete reference, see [`OneDriveSurface`](https://github.com/microsoft/RAMPART/blob/main/rampart/surfaces/onedrive.py).

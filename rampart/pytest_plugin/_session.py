@@ -47,6 +47,34 @@ def _result_sort_key(result: Result) -> tuple[str, int, str]:
     return (nodeid, index, source_worker)
 
 
+def tag_collected_results(
+    *,
+    node: pytest.Item,
+    results: Sequence[Result],
+) -> list[Result]:
+    """Copy and tag Results with their pytest item metadata.
+
+    Returns:
+        list[Result]: Tagged shallow copies in their original order.
+    """
+    test_name = node.name
+    harm_marker = node.get_closest_marker("harm")
+    harm_category = harm_marker.args[0] if harm_marker and harm_marker.args else None
+    tagged: list[Result] = []
+    for result_index, original_result in enumerate(results):
+        result = copy.copy(original_result)
+        result.metadata = {
+            **result.metadata,
+            "_pytest_test_name": test_name,
+            "_pytest_nodeid": node.nodeid,
+            "_rampart_result_index": result_index,
+        }
+        if harm_category is not None and result.harm_category is None:
+            result.harm_category = harm_category
+        tagged.append(result)
+    return tagged
+
+
 @dataclass(frozen=True, kw_only=True)
 class TrialSpec:
     """Trial-clone metadata captured at collection time.
@@ -76,7 +104,27 @@ class TrialGroupResult:
     no_result: int
     threshold: float
     pass_rate: float
-    passed: bool
+
+    @property
+    def status(self) -> SafetyStatus:
+        """Resolve status using the population error and threshold policy."""
+        if self.errors > 0:
+            return SafetyStatus.ERROR
+        if self.executed_count > 0 and self.pass_rate >= self.threshold:
+            return SafetyStatus.SAFE
+        if self.unsafe > 0:
+            return SafetyStatus.UNSAFE
+        return SafetyStatus.UNDETERMINED
+
+    @property
+    def passed(self) -> bool:
+        """Whether the trial group met its safety threshold."""
+        return self.status is SafetyStatus.SAFE
+
+    @property
+    def executed_count(self) -> int:
+        """Number of clones that produced at least one result."""
+        return self.total - self.no_result
 
     @property
     def verdict(self) -> str:
@@ -203,27 +251,7 @@ class RampartSession:
             node (pytest.Item): The test item that just completed.
             collector (ResultCollector): The test's result collector.
         """
-        test_name = node.nodeid.split("::")[-1] if "::" in node.nodeid else node.nodeid
-        harm_marker = node.get_closest_marker("harm")
-        harm_category = (
-            harm_marker.args[0] if harm_marker and harm_marker.args else None
-        )
-
-        collected = collector.results
-        tagged: list[Result] = []
-        for result_index, original_result in enumerate(collected):
-            # Shallow copy is sufficient because we reconstruct all
-            # mutable fields we modify (currently metadata and harm_category).
-            result = copy.copy(original_result)
-            result.metadata = {
-                **result.metadata,
-                "_pytest_test_name": test_name,
-                "_pytest_nodeid": node.nodeid,
-                "_rampart_result_index": result_index,
-            }
-            if harm_category is not None and result.harm_category is None:
-                result.harm_category = harm_category
-            tagged.append(result)
+        tagged = tag_collected_results(node=node, results=collector.results)
         self._results.extend(tagged)
         self._results_by_nodeid[node.nodeid] = tagged
         self._cached_report = None
@@ -238,9 +266,10 @@ class RampartSession:
         """Record aggregate statistics for a trial group.
 
         Semantics:
-        - Any UNSAFE result across all trials -> group FAILS
+        - Any ERROR result across all trials -> group resolves to ERROR.
         - threshold is the minimum pass rate (SAFE / total).
                 e.g. 0.8 means at least 80% of runs must be SAFE.
+        - UNSAFE results are tolerated when the pass rate meets the threshold.
         - ERROR results count against the pass rate (they're not SAFE).
         - Clones with zero results (skipped or crashed before producing
                 a Result) are tracked as ``no_result`` and count against
@@ -269,15 +298,14 @@ class RampartSession:
             has_unsafe = any(r.status == SafetyStatus.UNSAFE for r in node_results)
             has_error = any(r.status == SafetyStatus.ERROR for r in node_results)
             has_safe = any(r.status == SafetyStatus.SAFE for r in node_results)
-            if has_unsafe:
-                unsafe_count += 1
-            elif has_error:
+            if has_error:
                 error_count += 1
+            elif has_unsafe:
+                unsafe_count += 1
             elif has_safe:
                 safe_count += 1
 
         pass_rate = safe_count / total if total > 0 else 0.0
-        passed = unsafe_count == 0 and pass_rate >= threshold
 
         self._trial_groups[base_nodeid] = TrialGroupResult(
             total=total,
@@ -287,7 +315,6 @@ class RampartSession:
             no_result=no_result_count,
             threshold=threshold,
             pass_rate=pass_rate,
-            passed=passed,
         )
 
     def register_trial_spec(
@@ -383,7 +410,8 @@ class RampartSession:
                 in the report metadata.
         """
         self._incomplete = True
-        self._incomplete_reasons.append(reason)
+        if reason not in self._incomplete_reasons:
+            self._incomplete_reasons.append(reason)
         self._cached_report = None
 
     def set_report_metadata(self, *, metadata: dict[str, object]) -> None:

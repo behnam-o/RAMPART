@@ -9,26 +9,48 @@ import pytest
 
 from rampart.core.errors import InfrastructureError
 from rampart.core.evaluator import BaseEvaluator
+from rampart.core.execution import execute_trials_async
 from rampart.core.manifest import AppManifest
+from rampart.core.prompt_driver import PromptDecision
 from rampart.core.result import SafetyStatus
 from rampart.core.types import (
     EvalContext,
     EvalOutcome,
     EvalResult,
     ObservabilityLevel,
+    Request,
     Response,
     ToolCall,
+    Turn,
 )
 from rampart.drivers.static import StaticDriver
+from rampart.evaluators import (
+    ResponseContains,
+    SideEffectOccurred,
+    ToolCalled,
+)
 from rampart.probes import Probes
+from rampart.probes._single_turn import _build_summary
 from tests.fixtures import MockAdapter, MockSession
 
 
-def _adapter(*, responses: list[Response]) -> MockAdapter:
+class _Unrenderable:
+    """Stands in for an evaluator value whose ``__str__`` raises."""
+
+    def __str__(self) -> str:
+        raise RuntimeError("boom")
+
+
+def _adapter(
+    *,
+    responses: list[Response],
+    observability: ObservabilityLevel = ObservabilityLevel.TOOL_AND_SIDE_EFFECTS,
+) -> MockAdapter:
     """Build a MockAdapter for testing."""
     return MockAdapter(
         responses=responses,
         manifest=AppManifest(name="test-agent"),
+        observability_profile=observability,
     )
 
 
@@ -44,6 +66,13 @@ class _NeverDetects(BaseEvaluator):
 
     async def evaluate_async(self, *, context: EvalContext) -> EvalResult:
         return EvalResult(outcome=EvalOutcome.NOT_DETECTED, rationale="never detected")
+
+
+class _UndeterminedWithoutRationale(BaseEvaluator):
+    """Evaluator stub that gives up without explaining why."""
+
+    async def evaluate_async(self, *, context: EvalContext) -> EvalResult:
+        return EvalResult(outcome=EvalOutcome.UNDETERMINED)
 
 
 class _DetectsToolCall(BaseEvaluator):
@@ -63,6 +92,23 @@ class _DetectsToolCall(BaseEvaluator):
             outcome=EvalOutcome.NOT_DETECTED,
             rationale=f"{self._tool_name} not called",
         )
+
+
+class _StatefulDriver:
+    """Driver that emits one prompt over its lifetime."""
+
+    def __init__(self) -> None:
+        self._used = False
+
+    async def next_prompt_async(
+        self,
+        *,
+        history: list[Turn],
+    ) -> PromptDecision | None:
+        if self._used:
+            return None
+        self._used = True
+        return PromptDecision(request=Request(prompt="fresh"))
 
 
 class TestProbePolarity:
@@ -89,6 +135,83 @@ class TestProbePolarity:
 
         assert result.safe is False
         assert result.status == SafetyStatus.UNSAFE
+
+
+class TestProbeEvaluatorObservability:
+    """A probe does not fail the agent for a channel the adapter does not report."""
+
+    async def test_tool_evaluator_undetermined_under_response_only_async(self) -> None:
+        adapter = _adapter(
+            responses=[Response(text="done")],
+            observability=ObservabilityLevel.RESPONSE_ONLY,
+        )
+
+        result = await Probes.behavior(
+            prompt="test",
+            evaluator=ToolCalled("audit_log"),
+        ).execute_async(adapter=adapter)
+
+        assert result.safe is False
+        assert result.status is SafetyStatus.UNDETERMINED
+
+    async def test_undetermined_summary_explains_the_gap_async(self) -> None:
+        adapter = _adapter(
+            responses=[Response(text="done")],
+            observability=ObservabilityLevel.RESPONSE_ONLY,
+        )
+
+        result = await Probes.behavior(
+            prompt="test",
+            evaluator=ToolCalled("audit_log"),
+        ).execute_async(adapter=adapter)
+
+        assert "response_only" in result.summary
+        assert "audit_log" in result.summary
+
+    async def test_undetermined_summary_falls_back_without_rationale_async(
+        self,
+    ) -> None:
+        adapter = _adapter(responses=[Response(text="done")])
+
+        result = await Probes.behavior(
+            prompt="test",
+            evaluator=_UndeterminedWithoutRationale(),
+        ).execute_async(adapter=adapter)
+
+        assert result.status is SafetyStatus.UNDETERMINED
+        assert result.summary == (
+            "UNDETERMINED: Could not determine if expected behavior occurred"
+        )
+
+    async def test_tool_evaluator_unsafe_when_tool_calls_reported_async(self) -> None:
+        adapter = _adapter(
+            responses=[Response(text="done")],
+            observability=ObservabilityLevel.TOOL_ONLY,
+        )
+
+        result = await Probes.behavior(
+            prompt="test",
+            evaluator=ToolCalled("audit_log"),
+        ).execute_async(adapter=adapter)
+
+        assert result.safe is False
+        assert result.status is SafetyStatus.UNSAFE
+
+    async def test_tool_evaluator_safe_when_tool_was_called_async(self) -> None:
+        adapter = _adapter(
+            responses=[
+                Response(text="done", tool_calls=[ToolCall(name="audit_log")]),
+            ],
+            observability=ObservabilityLevel.TOOL_ONLY,
+        )
+
+        result = await Probes.behavior(
+            prompt="test",
+            evaluator=ToolCalled("audit_log"),
+        ).execute_async(adapter=adapter)
+
+        assert result.safe is True
+        assert result.status is SafetyStatus.SAFE
 
 
 class TestProbeStrategyName:
@@ -122,13 +245,43 @@ class TestProbePopulationIsolation:
 
         adapter = TrackingAdapter()
 
-        await Probes.behavior(
-            prompt="test",
-            evaluator=_DetectsAlways(),
-        ).execute_trials_async(adapter=adapter, n=3, threshold=1.0)
+        await execute_trials_async(
+            execution_factory=lambda: Probes.behavior(
+                prompt="test",
+                evaluator=_DetectsAlways(),
+            ),
+            adapter=adapter,
+            n=3,
+            threshold=1.0,
+        )
 
         assert len(adapter.sessions) == 3
         assert len({id(session) for session in adapter.sessions}) == 3
+
+    async def test_each_trial_constructs_a_fresh_driver_async(self) -> None:
+        drivers: list[_StatefulDriver] = []
+
+        def create_driver() -> _StatefulDriver:
+            driver = _StatefulDriver()
+            drivers.append(driver)
+            return driver
+
+        population = await execute_trials_async(
+            execution_factory=lambda: Probes.behavior(
+                driver=create_driver(),
+                evaluator=_NeverDetects(),
+            ),
+            adapter=_adapter(responses=[Response(text="ok")]),
+            n=3,
+            threshold=0.0,
+        )
+
+        assert len(drivers) == 3
+        assert [result.turns[0].request.prompt for result in population.results] == [
+            "fresh",
+            "fresh",
+            "fresh",
+        ]
 
 
 class TestProbePromptCoercion:
@@ -284,3 +437,336 @@ class TestProbeMaxTurns:
         assert result.safe is False
         assert result.status == SafetyStatus.UNSAFE
         assert len(result.turns) == 2
+
+
+class TestProbeUnsafeSummary:
+    """An unsafe summary names the turn that settled it, not an undetermined one."""
+
+    def test_summary_uses_only_not_detected_rationales(self) -> None:
+        summary = _build_summary(
+            status=SafetyStatus.UNSAFE,
+            eval_results=[
+                EvalResult(
+                    outcome=EvalOutcome.NOT_DETECTED,
+                    rationale="Target pattern not found in response text",
+                ),
+                EvalResult(
+                    outcome=EvalOutcome.UNDETERMINED,
+                    rationale="Adapter observability is 'tool_only'",
+                ),
+            ],
+        )
+
+        assert "not found" in summary
+        assert "tool_only" not in summary
+
+    def test_summary_falls_back_without_a_rationale(self) -> None:
+        summary = _build_summary(
+            status=SafetyStatus.UNSAFE,
+            eval_results=[EvalResult(outcome=EvalOutcome.NOT_DETECTED)],
+        )
+
+        assert summary == "UNSAFE: Expected behavior not detected"
+
+    def test_summary_falls_back_past_a_whitespace_rationale(self) -> None:
+        summary = _build_summary(
+            status=SafetyStatus.UNSAFE,
+            eval_results=[
+                EvalResult(outcome=EvalOutcome.NOT_DETECTED, rationale="   "),
+            ],
+        )
+
+        assert summary == "UNSAFE: Expected behavior not detected"
+
+    def test_summary_names_the_last_undetected_turn(self) -> None:
+        summary = _build_summary(
+            status=SafetyStatus.UNSAFE,
+            eval_results=[
+                EvalResult(
+                    outcome=EvalOutcome.NOT_DETECTED,
+                    rationale="Disclaimer not found on the first prompt",
+                ),
+                EvalResult(
+                    outcome=EvalOutcome.NOT_DETECTED,
+                    rationale="Disclaimer not found on the retry",
+                ),
+            ],
+        )
+
+        assert summary == "UNSAFE: Disclaimer not found on the retry"
+
+
+class TestProbeUndeterminedSummary:
+    """An undetermined summary should name every gap that was carried up."""
+
+    def test_summary_names_every_operand_gap(self) -> None:
+        summary = _build_summary(
+            status=SafetyStatus.UNDETERMINED,
+            eval_results=[
+                EvalResult(
+                    outcome=EvalOutcome.UNDETERMINED,
+                    rationale="Left operand undetermined: tool calls unobservable",
+                    undetermined_operands=[
+                        "tool calls unobservable",
+                        "side effects unobservable",
+                    ],
+                ),
+            ],
+        )
+
+        assert "tool calls unobservable" in summary
+        assert "side effects unobservable" in summary
+
+    def test_summary_deduplicates_operand_reasons(self) -> None:
+        summary = _build_summary(
+            status=SafetyStatus.UNDETERMINED,
+            eval_results=[
+                EvalResult(
+                    outcome=EvalOutcome.UNDETERMINED,
+                    undetermined_operands=["same gap"],
+                ),
+                EvalResult(
+                    outcome=EvalOutcome.UNDETERMINED,
+                    undetermined_operands=["same gap"],
+                ),
+            ],
+        )
+
+        assert summary == "UNDETERMINED: same gap"
+
+    def test_summary_counts_the_gaps_it_does_not_name(self) -> None:
+        summary = _build_summary(
+            status=SafetyStatus.UNDETERMINED,
+            eval_results=[
+                EvalResult(
+                    outcome=EvalOutcome.UNDETERMINED,
+                    undetermined_operands=["gap a", "gap b", "gap c", "gap d"],
+                ),
+            ],
+        )
+
+        assert summary == "UNDETERMINED: gap a; gap b (and 2 more)"
+
+    def test_summary_ignores_operands_carried_by_a_settled_result(self) -> None:
+        summary = _build_summary(
+            status=SafetyStatus.UNDETERMINED,
+            eval_results=[
+                EvalResult(
+                    outcome=EvalOutcome.NOT_DETECTED,
+                    undetermined_operands=["gap that did not settle the verdict"],
+                ),
+                EvalResult(
+                    outcome=EvalOutcome.UNDETERMINED,
+                    rationale="Adapter observability is 'tool_only'",
+                ),
+            ],
+        )
+
+        assert "tool_only" in summary
+        assert "did not settle" not in summary
+
+    def test_summary_falls_back_to_the_rationale(self) -> None:
+        summary = _build_summary(
+            status=SafetyStatus.UNDETERMINED,
+            eval_results=[
+                EvalResult(
+                    outcome=EvalOutcome.UNDETERMINED,
+                    rationale="Adapter observability is 'response_only'",
+                ),
+            ],
+        )
+
+        assert summary == "UNDETERMINED: Adapter observability is 'response_only'"
+
+    def test_summary_falls_back_without_a_rationale(self) -> None:
+        summary = _build_summary(
+            status=SafetyStatus.UNDETERMINED,
+            eval_results=[EvalResult(outcome=EvalOutcome.UNDETERMINED)],
+        )
+
+        assert summary == (
+            "UNDETERMINED: Could not determine if expected behavior occurred"
+        )
+
+
+class TestProbeSafeSummary:
+    """A safe probe says when part of the evaluation stayed undetermined."""
+
+    def test_safe_summary_names_the_undetermined_operand(self) -> None:
+        summary = _build_summary(
+            status=SafetyStatus.SAFE,
+            eval_results=[
+                EvalResult(
+                    outcome=EvalOutcome.DETECTED,
+                    undetermined_operands=["tool calls not reported"],
+                ),
+            ],
+        )
+
+        assert summary == (
+            "Expected behavior detected, but part of the evaluation was "
+            "undetermined: tool calls not reported"
+        )
+
+    def test_safe_summary_is_plain_when_everything_was_determined(self) -> None:
+        summary = _build_summary(
+            status=SafetyStatus.SAFE,
+            eval_results=[EvalResult(outcome=EvalOutcome.DETECTED)],
+        )
+
+        assert summary == "Expected behavior detected"
+
+    async def test_disjunction_settled_past_a_gap_reports_it_async(self) -> None:
+        adapter = _adapter(
+            responses=[Response(text="audit entry logged")],
+            observability=ObservabilityLevel.RESPONSE_ONLY,
+        )
+
+        result = await Probes.behavior(
+            prompt="test",
+            evaluator=ToolCalled("audit_log") | ResponseContains("logged"),
+        ).execute_async(adapter=adapter)
+
+        assert result.status is SafetyStatus.SAFE
+        assert "part of the evaluation was undetermined" in result.summary
+        assert "audit_log" in result.summary
+
+
+class TestProbeUndeterminedSummaryEndToEnd:
+    """An undetermined probe names every channel it could not observe."""
+
+    async def test_disjunction_names_both_unobservable_channels_async(self) -> None:
+        # The composite words its rationale after the operand it reported
+        # first, so only an end-to-end run proves both gaps are recorded and
+        # both reach the summary.
+        adapter = _adapter(
+            responses=[Response(text="nothing to see")],
+            observability=ObservabilityLevel.RESPONSE_ONLY,
+        )
+
+        result = await Probes.behavior(
+            prompt="test",
+            evaluator=ToolCalled("x") | SideEffectOccurred("y"),
+        ).execute_async(adapter=adapter)
+
+        assert result.status is SafetyStatus.UNDETERMINED
+        assert "does not report tool calls" in result.summary
+        assert "does not report side effects" in result.summary
+
+
+class TestProbeSummaryHostileOperands:
+    """A bad operand collection must not abort the summary."""
+
+    def test_safe_summary_survives_a_bad_operand_collection(self) -> None:
+        summary = _build_summary(
+            status=SafetyStatus.SAFE,
+            eval_results=[
+                EvalResult(
+                    outcome=EvalOutcome.DETECTED,
+                    undetermined_operands=123,  # ty: ignore[invalid-argument-type]
+                ),
+            ],
+        )
+
+        assert summary == "Expected behavior detected"
+
+    def test_undetermined_summary_falls_back_past_a_bad_collection(self) -> None:
+        summary = _build_summary(
+            status=SafetyStatus.UNDETERMINED,
+            eval_results=[
+                EvalResult(
+                    outcome=EvalOutcome.UNDETERMINED,
+                    rationale="Adapter observability is 'tool_only'",
+                    undetermined_operands=123,  # ty: ignore[invalid-argument-type]
+                ),
+            ],
+        )
+
+        assert summary == "UNDETERMINED: Adapter observability is 'tool_only'"
+
+
+class TestProbeSummaryHostileRationale:
+    """A rationale that cannot be rendered must not abort the summary."""
+
+    def test_unsafe_summary_survives_a_raising_rationale(self) -> None:
+        summary = _build_summary(
+            status=SafetyStatus.UNSAFE,
+            eval_results=[
+                EvalResult(
+                    outcome=EvalOutcome.NOT_DETECTED,
+                    rationale=_Unrenderable(),  # ty: ignore[invalid-argument-type]
+                ),
+            ],
+        )
+
+        assert summary == "UNSAFE: <unprintable value>"
+
+    def test_error_summary_survives_a_raising_rationale(self) -> None:
+        summary = _build_summary(
+            status=SafetyStatus.ERROR,
+            eval_results=[
+                EvalResult(
+                    outcome=EvalOutcome.UNDETERMINED,
+                    rationale=_Unrenderable(),  # ty: ignore[invalid-argument-type]
+                ),
+            ],
+        )
+
+        assert summary == "ERROR: <unprintable value>"
+
+    def test_unsafe_summary_survives_a_hostile_string_subclass(self) -> None:
+        # str() accepts a __str__ that returns a str subclass, so the rendered
+        # value would still run this strip if safe_str did not normalize it.
+        class Sneaky(str):  # ruff: ignore[subclass-builtin]
+            __slots__ = ()
+
+            def __str__(self) -> str:
+                return self
+
+            def strip(self, chars: str | None = None) -> str:
+                raise RuntimeError("boom")
+
+        summary = _build_summary(
+            status=SafetyStatus.UNSAFE,
+            eval_results=[
+                EvalResult(
+                    outcome=EvalOutcome.NOT_DETECTED,
+                    rationale=Sneaky("  the disclaimer was missing  "),
+                ),
+            ],
+        )
+
+        assert summary == "UNSAFE: the disclaimer was missing"
+
+    def test_undetermined_summary_survives_a_raising_rationale(self) -> None:
+        summary = _build_summary(
+            status=SafetyStatus.UNDETERMINED,
+            eval_results=[
+                EvalResult(
+                    outcome=EvalOutcome.UNDETERMINED,
+                    rationale=_Unrenderable(),  # ty: ignore[invalid-argument-type]
+                ),
+            ],
+        )
+
+        assert summary == "UNDETERMINED: <unprintable value>"
+
+    def test_unsafe_summary_survives_raising_rationale_truthiness(self) -> None:
+        class RaisingBool:
+            def __bool__(self) -> bool:
+                raise RuntimeError("boom")
+
+            def __str__(self) -> str:
+                return "unrenderable rationale"
+
+        summary = _build_summary(
+            status=SafetyStatus.UNSAFE,
+            eval_results=[
+                EvalResult(
+                    outcome=EvalOutcome.NOT_DETECTED,
+                    rationale=RaisingBool(),  # ty: ignore[invalid-argument-type]
+                ),
+            ],
+        )
+
+        assert summary == "UNSAFE: unrenderable rationale"
