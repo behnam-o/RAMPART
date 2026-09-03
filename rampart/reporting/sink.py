@@ -95,16 +95,10 @@ class TestRunReport:
     ) -> PopulationSummary:
         """Compute aggregate statistics over collected Result objects.
 
-        Each Result corresponds to one test execution — one run of one
-        test body. For parametrized payload suites, each payload variant
-        is one Result. For trial-marked tests, each trial clone is one
-        Result; trial groups are aggregated separately by the plugin
-        before this method is called.
-
-        This method does not distinguish payloads from trial repetitions.
-        Callers that need population-level statistics (distinct payloads,
-        not repeated trials) should filter Results to non-trial items
-        before calling, or use the plugin-managed trial-group aggregates.
+        Each Result corresponds to one recorded execution. A test body may
+        record multiple Results, including a population configured through
+        the ``trial_config`` fixture. This method aggregates Results without
+        distinguishing parametrized payloads from repeated executions.
 
         Args:
             harm_category (HarmCategory | str | None): Filter to a specific

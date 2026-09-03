@@ -54,7 +54,7 @@ for turn in result.turns:
 
 ### Observability Gaps on a Passing Run
 
-A run can resolve `SAFE` while part of the evaluation was never observable. Such a run is graded as a pass: `result.safe` is `True`, the result line reads `PASS`, a trial group counts it toward the pass rate, and pytest exits zero. `result.summary` names the gap, and `turn.eval_result.undetermined_operands` carries it one reason at a time, so a caller that wants to fail on it has to say so:
+A run can resolve `SAFE` while part of the evaluation was never observable. Such a run is graded as a pass: `result.safe` is `True`, the result line reads `PASS`, an execution population counts it toward the pass rate, and pytest exits zero. `result.summary` names the gap, and `turn.eval_result.undetermined_operands` carries it one reason at a time, so a caller that wants to fail on it has to say so:
 
 ```python
 gaps = [

@@ -20,7 +20,7 @@ import pytest
 from rampart.pytest_plugin._xdist import MIN_RESULT_SIZE_LIMIT_BYTES
 
 if TYPE_CHECKING:
-    from _pytest.pytester import Pytester, RunResult
+    from _pytest.pytester import Pytester
 
 
 pytest_plugins = ["pytester"]
@@ -500,11 +500,12 @@ class TestXdistTrialAggregation:
 
             @pytest.mark.harm("test")
             @pytest.mark.trial(n=4, threshold=0.5)
-            def test_trial_split():
-                record_result(Result(
-                    status=SafetyStatus.SAFE, summary="t",
-                    observability_level=ObservabilityLevel.RESPONSE_ONLY,
-                ))
+            def test_trial_split(trial_config):
+                for _ in range(trial_config.n):
+                    record_result(Result(
+                        status=SafetyStatus.SAFE, summary="t",
+                        observability_level=ObservabilityLevel.RESPONSE_ONLY,
+                    ))
             """,
         )
         result = configured_pytester.runpytest(
@@ -515,7 +516,7 @@ class TestXdistTrialAggregation:
             "--dist",
             "loadgroup",
         )
-        result.assert_outcomes(passed=4)
+        result.assert_outcomes(passed=1)
         reports = _load_reports(configured_pytester)
         assert len(reports) == 1
         assert reports[0]["total_runs"] == 4
@@ -533,11 +534,12 @@ class TestXdistTrialAggregation:
 
             @pytest.mark.harm("test")
             @pytest.mark.trial(n=4, threshold=0.5)
-            def test_trial_split():
-                record_result(Result(
-                    status=SafetyStatus.SAFE, summary="t",
-                    observability_level=ObservabilityLevel.RESPONSE_ONLY,
-                ))
+            def test_trial_split(trial_config):
+                for _ in range(trial_config.n):
+                    record_result(Result(
+                        status=SafetyStatus.SAFE, summary="t",
+                        observability_level=ObservabilityLevel.RESPONSE_ONLY,
+                    ))
             """,
         )
         result = configured_pytester.runpytest(
@@ -548,16 +550,16 @@ class TestXdistTrialAggregation:
             "--dist",
             "load",
         )
-        result.assert_outcomes(passed=4)
+        result.assert_outcomes(passed=1)
         reports = _load_reports(configured_pytester)
         assert len(reports) == 1
         assert reports[0]["total_runs"] == 4
 
-    def test_trial_group_passes_at_threshold_under_load(
+    def test_trial_population_results_preserved_under_load(
         self,
         configured_pytester: Pytester,
     ) -> None:
-        """Threshold aggregation remains correct when clones split workers."""
+        """A configurable population preserves each Result under xdist."""
         configured_pytester.makepyfile(
             test_trial_mixed_load="""
             import pytest
@@ -567,13 +569,14 @@ class TestXdistTrialAggregation:
 
             @pytest.mark.harm("test")
             @pytest.mark.trial(n=4, threshold=0.5)
-            def test_trial_mixed_load(request):
-                unsafe = request.node.name.endswith("[trial-3]")
-                record_result(Result(
-                    status=SafetyStatus.UNSAFE if unsafe else SafetyStatus.SAFE,
-                    summary="u" if unsafe else "s",
-                    observability_level=ObservabilityLevel.RESPONSE_ONLY,
-                ))
+            def test_trial_mixed_load(trial_config):
+                for index in range(trial_config.n):
+                    unsafe = index == 3
+                    record_result(Result(
+                        status=SafetyStatus.UNSAFE if unsafe else SafetyStatus.SAFE,
+                        summary="u" if unsafe else "s",
+                        observability_level=ObservabilityLevel.RESPONSE_ONLY,
+                    ))
             """,
         )
         result = configured_pytester.runpytest(
@@ -584,17 +587,13 @@ class TestXdistTrialAggregation:
             "--dist",
             "load",
         )
-        result.assert_outcomes(passed=4)
+        result.assert_outcomes(passed=1)
         reports = _load_reports(configured_pytester)
         assert len(reports) == 1
         report = reports[0]
         assert report["total_runs"] == 4
+        assert report["passed"] == 3
         assert report["failed"] == 1
-        summary = "\n".join(result.outlines)
-        assert (
-            "PASS  test_trial_mixed_load [3/4 safe, 75% pass rate, threshold: 50%]"
-            in summary
-        )
 
 
 class TestXdistMetadata:
@@ -665,41 +664,27 @@ class TestCollectOnly:
                 assert reports == []
 
 
-class TestCloneIdDeterminism:
-    def test_trial_clone_ids_deterministic_across_processes(
+class TestTrialCollection:
+    def test_trial_marker_collects_one_item(
         self,
         configured_pytester: Pytester,
     ) -> None:
         configured_pytester.makepyfile(
-            test_det="""
+            test_override="""
             import pytest
 
-            @pytest.mark.trial(n=3)
-            def test_x():
+            @pytest.mark.trial(n=2, threshold=0.8)
+            def test_population(trial_config):
                 pass
             """,
         )
-        result_serial: RunResult = configured_pytester.runpytest(
+
+        result = configured_pytester.runpytest(
             "-p",
             "no:cacheprovider",
+            "--rampart-trials=5",
             "--collect-only",
             "-q",
         )
-        result_parallel: RunResult = configured_pytester.runpytest(
-            "-p",
-            "no:cacheprovider",
-            "--collect-only",
-            "-q",
-            "-n",
-            "2",
-        )
 
-        def _trial_ids(lines: list[str]) -> list[str]:
-            return sorted(line.strip() for line in lines if "trial-" in line)
-
-        serial_ids = _trial_ids(result_serial.outlines)
-        parallel_ids = _trial_ids(result_parallel.outlines)
-        # Under xdist --collect-only, both should produce the same
-        # deterministic clone IDs so that workers can match them.
-        if serial_ids and parallel_ids:
-            assert serial_ids == parallel_ids
+        assert result.outlines.count("test_override.py::test_population") == 1

@@ -6,9 +6,7 @@
 Registered via the pytest11 entry point in pyproject.toml. Provides:
 - harm and trial markers
 - automatic result collection via the default handler factory
-- trial cloning at collection time
 - terminal summary with harm-category grouping
-- session-finish aggregation for trial groups
 - sink emission for structured reporting
 
 Note: The architecture defines _default_handler_factory as a plain
@@ -43,6 +41,12 @@ from rampart.pytest_plugin._collection import (
     get_active_collector,
 )
 from rampart.pytest_plugin._session import RampartSession, tag_collected_results
+from rampart.pytest_plugin._trial import (
+    TRIALS_OPTION,
+    TrialConfig,
+    parse_positive_int,
+    resolve_trial_config,
+)
 from rampart.pytest_plugin._xdist import (
     DEFAULT_SIZE_LIMIT_BYTES,
     SIZE_LIMIT_OPTION,
@@ -77,6 +81,7 @@ __all__ = [
     "pytest_terminal_summary",
     "pytest_testnodedown",
     "pytest_unconfigure",
+    "trial_config",
 ]
 
 # Config-scoped stash keys: one entry per pytest session.
@@ -115,57 +120,6 @@ def _sanitize_for_terminal(text: str) -> str:
     return strip_ansi(text)
 
 
-def _resolve_trial_n(marker: pytest.Mark) -> int:
-    """Extract the trial count from a trial marker.
-
-    Supports both positional and keyword argument forms:
-    ``@pytest.mark.trial(5)`` and ``@pytest.mark.trial(n=5)``.
-    Keyword takes precedence when both are provided.
-
-    Args:
-        marker (pytest.Mark): The trial marker.
-
-    Returns:
-        int: The number of trial repetitions.
-
-    Raises:
-        pytest.UsageError: If the resolved value is not an integer.
-    """
-    raw: Any
-    if "n" in marker.kwargs:
-        raw = marker.kwargs["n"]
-    elif marker.args:
-        raw = marker.args[0]
-    else:
-        return 1
-
-    if not isinstance(raw, int) or isinstance(raw, bool):
-        msg = f"trial(n=) must be an integer, got {type(raw).__name__}: {raw!r}"
-        raise pytest.UsageError(msg)
-    if raw < 1:
-        msg = f"trial(n=) must be >= 1, got {raw}"
-        raise pytest.UsageError(msg)
-    return raw
-
-
-def _resolve_trial_threshold(marker: pytest.Mark) -> float:
-    """Extract the threshold from a trial marker.
-
-    Returns 0.0 when no threshold is provided (the historical default).
-
-    Args:
-        marker (pytest.Mark): The trial marker.
-
-    Returns:
-        float: The pass-rate threshold in [0.0, 1.0].
-    """
-    raw: Any = marker.kwargs.get("threshold", 0.0)
-    try:
-        return float(raw)
-    except (TypeError, ValueError):
-        return 0.0
-
-
 def pytest_addhooks(pluginmanager: pytest.PytestPluginManager) -> None:
     """Register RAMPART's hook specifications.
 
@@ -183,6 +137,14 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         parser (pytest.Parser): The pytest argument parser.
     """
     group = parser.getgroup("rampart")
+    group.addoption(
+        "--rampart-trials",
+        dest=TRIALS_OPTION,
+        type=parse_positive_int,
+        default=None,
+        metavar="N",
+        help="Override the execution count declared by @pytest.mark.trial.",
+    )
     group.addoption(
         f"--{SIZE_LIMIT_OPTION.replace('_', '-')}",
         dest=SIZE_LIMIT_OPTION,
@@ -219,7 +181,10 @@ def pytest_configure(config: pytest.Config) -> None:
         config (pytest.Config): The pytest configuration object.
     """
     config.addinivalue_line("markers", "harm(*categories): categorize by harm type")
-    config.addinivalue_line("markers", "trial(n=, threshold=): statistical repetition")
+    config.addinivalue_line(
+        "markers",
+        "trial(n=1, threshold=1.0): declare a selectable trial population",
+    )
 
     register_default_handler_factory(_default_handler_factory)
 
@@ -240,162 +205,27 @@ def pytest_unconfigure(config: pytest.Config) -> None:
         del config.stash[_session_start_key]
 
 
-def _copy_markers_to_clone(*, source: pytest.Item, clone: pytest.Item) -> None:
-    """Copy all markers from the original item to its trial clone.
-
-    Markers applied at the class level, module level, or via conftest
-    pytestmark are NOT transferred by ``from_parent``. This function
-    ensures trial clones inherit all markers (harm, parametrize, etc.)
-    from the original item. The trial marker itself is re-attached
-    separately by the caller.
-
-    Args:
-        source (pytest.Item): The original test item with all markers.
-        clone (pytest.Item): The cloned item that needs markers copied.
-    """
-    for marker in source.iter_markers():
-        if marker.name == "trial":
-            continue
-        clone.add_marker(
-            getattr(pytest.mark, marker.name)(*marker.args, **marker.kwargs),
-        )
-
-
-def _create_trial_clones(
-    *,
-    item: pytest.Item,
-    trial_marker: pytest.Mark,
-    count: int,
-) -> list[pytest.Item]:
-    """Create trial clone items from an original test item.
-
-    Each clone gets a unique ``[trial-N]`` suffix, all markers from
-    the original item (including class-level and module-level markers),
-    and private attributes for session-end aggregation.
-
-    Args:
-        item (pytest.Item): The original test item to clone.
-        trial_marker (pytest.Mark): The trial marker to re-attach.
-        count (int): Number of trial repetitions to create.
-
-    Returns:
-        list[pytest.Item]: The cloned trial items with trial metadata.
-
-    Raises:
-        pytest.UsageError: If the original item has no parent (cannot be
-            cloned in isolation).
-    """
-    original_name: str = getattr(item, "originalname", item.name)
-    display_name = item.name
-    parent = item.parent
-    callspec = getattr(item, "callspec", None)
-    fixtureinfo = getattr(item, "_fixtureinfo", None)
-    if parent is None:
-        msg = f"Cannot clone trial item with no parent: {item.nodeid}"
-        raise pytest.UsageError(msg)
-    clones: list[pytest.Item] = []
-
-    for i in range(count):
-        trial_name = f"{display_name}[trial-{i}]"
-        from_parent_kwargs: dict[str, Any] = {
-            "name": trial_name,
-            "originalname": original_name,
-        }
-        if callspec is not None:
-            from_parent_kwargs["callspec"] = callspec
-        if fixtureinfo is not None:
-            from_parent_kwargs["fixtureinfo"] = fixtureinfo
-
-        clone = type(item).from_parent(parent=parent, **from_parent_kwargs)
-        # pytest.Item supports arbitrary user attributes for cross-hook state.
-        clone._rampart_trial_index = i  # ty: ignore[unresolved-attribute]  # ruff: ignore[private-member-access]
-        clone._rampart_trial_base = item.nodeid  # ty: ignore[unresolved-attribute]  # ruff: ignore[private-member-access]
-
-        _copy_markers_to_clone(source=item, clone=clone)
-        clone.add_marker(
-            pytest.mark.trial(*trial_marker.args, **trial_marker.kwargs),
-        )
-        # Group all trials for the same base test on one xdist worker
-        # so that trial aggregation works correctly across workers.
-        clone.add_marker(pytest.mark.xdist_group(item.nodeid))
-        clones.append(clone)
-
-    return clones
-
-
-@pytest.hookimpl(trylast=True)
 def pytest_collection_modifyitems(
     config: pytest.Config,
     items: list[pytest.Item],
 ) -> None:
-    """Clone trial-marked items and validate marker usage.
-
-    Uses ``trylast=True`` so clones are created after pytest-asyncio
-    has wrapped async items — ``item.obj`` on the original already
-    carries the async wrapper, which is passed to clones via callobj.
-
-    Expands each ``@pytest.mark.trial(n=)`` item into *n* clones with
-    distinct node IDs. All markers (harm, parametrize, etc.) from the
-    original item are copied to each clone. Attaches
-    ``_rampart_trial_index`` and ``_rampart_trial_base`` to each clone
-    for session-end aggregation.
+    """Validate trial declarations without changing collected items.
 
     Args:
         config (pytest.Config): The pytest configuration object.
-        items (list[pytest.Item]): The collected test items.
+        items (list[pytest.Item]): Collected test items.
 
     Raises:
-        pytest.UsageError: If trial(n=) is not a positive integer or
-            item has no parent.
+        pytest.UsageError: If a trial declaration is invalid or its test does
+            not consume the trial configuration fixture.
     """
-    expanded: list[pytest.Item] = []
-    saw_trial = False
-    rampart_session = config.stash.get(_rampart_key, None)
     for item in items:
-        trial_marker = item.get_closest_marker("trial")
-        if trial_marker is None:
-            expanded.append(item)
+        if item.get_closest_marker("trial") is None:
             continue
-
-        saw_trial = True
-        n = _resolve_trial_n(trial_marker)
-        threshold = _resolve_trial_threshold(trial_marker)
-        clones = _create_trial_clones(
-            item=item,
-            trial_marker=trial_marker,
-            count=n,
-        )
-
-        if rampart_session is not None:
-            # Registered on every process, including xdist workers whose
-            # specs the controller's merge later drops via setdefault. The
-            # redundancy is intentional: it keeps single-process and the
-            # controller's own collection pass correct without branching on
-            # worker vs controller. Do not "optimize" it away on workers —
-            # that breaks the single-process and fallback paths.
-            base_nodeid = item.nodeid
-            for clone in clones:
-                rampart_session.register_trial_spec(
-                    clone_nodeid=clone.nodeid,
-                    base_nodeid=base_nodeid,
-                    threshold=threshold,
-                )
-
-        expanded.extend(clones)
-
-    items[:] = expanded
-
-    if saw_trial and is_xdist_controller(config=config):
-        dist_mode = get_dist_mode(config=config)
-        if dist_mode != "loadgroup":
-            logger.warning(
-                "RAMPART @trial markers present with --dist=%s. Trial "
-                "clones may be split across workers. Aggregation remains "
-                "correct (controller merges all results), but using "
-                "--dist=loadgroup keeps trial clones co-located on one "
-                "worker for better locality.",
-                dist_mode,
-            )
+        resolve_trial_config(node=item, config=config)
+        if "trial_config" not in getattr(item, "fixturenames", ()):
+            msg = f"@pytest.mark.trial requires trial_config on {item.nodeid}"
+            raise pytest.UsageError(msg)
 
 
 def _absorb_results(
@@ -422,6 +252,22 @@ def _absorb_results(
             node.nodeid,
             exc_info=True,
         )
+
+
+@pytest.fixture
+def trial_config(request: pytest.FixtureRequest) -> TrialConfig:
+    """Resolve the current test's trial declaration and CLI override.
+
+    Args:
+        request (pytest.FixtureRequest): Current pytest fixture request.
+
+    Returns:
+        TrialConfig: Effective trial count and declared threshold.
+    """
+    return resolve_trial_config(
+        node=cast("pytest.Item", request.node),
+        config=request.config,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -590,84 +436,6 @@ def _resolve_hook_sinks(*, config: pytest.Config) -> list[ReportSink]:
     return sinks
 
 
-def _aggregate_trial_results(
-    *,
-    rampart_session: RampartSession,
-) -> None:
-    """Group trial specs by base node ID and compute per-group rates.
-
-    Trial specs are recorded during ``pytest_collection_modifyitems``
-    on every process and shipped through the xdist worker payload so
-    aggregation does not depend on ``session.items`` — which is not
-    reliably populated with trial clones on the xdist controller at
-    session-finish time.
-
-    Args:
-        rampart_session (RampartSession): The RAMPART session state.
-    """
-    groups: dict[str, list[tuple[str, float]]] = {}
-    for clone_nodeid, spec in rampart_session.trial_specs.items():
-        groups.setdefault(spec.base_nodeid, []).append(
-            (clone_nodeid, spec.threshold),
-        )
-
-    for base_nodeid, clones in groups.items():
-        # All clones of the same base share the same threshold; pick any.
-        threshold = clones[0][1]
-        rampart_session.record_trial_group(
-            base_nodeid=base_nodeid,
-            clone_nodeids=[c[0] for c in clones],
-            threshold=threshold,
-        )
-
-
-def _evaluate_gates(
-    *,
-    rampart_session: RampartSession,
-) -> None:
-    """Log trial group gate results.
-
-    Reports whether each trial group passed or failed based on:
-    - Any ERROR -> FAIL
-    - Pass rate at or above threshold -> PASS
-    - Otherwise, UNSAFE or UNDETERMINED -> FAIL
-
-    Args:
-        rampart_session (RampartSession): The RAMPART session state.
-    """
-    for base_nodeid, group in sorted(rampart_session.trial_groups.items()):
-        if group.status is SafetyStatus.SAFE:
-            logger.info(
-                "Gate PASSED: %s — %d/%d safe (%.0f%% pass rate, threshold: %.0f%%)",
-                base_nodeid,
-                group.safe,
-                group.total,
-                group.pass_rate * 100,
-                group.threshold * 100,
-            )
-        elif group.status is SafetyStatus.ERROR:
-            logger.info(
-                "Gate FAILED: %s — %d/%d runs had errors",
-                base_nodeid,
-                group.errors,
-                group.total,
-            )
-        elif group.status is SafetyStatus.UNSAFE:
-            logger.info(
-                "Gate FAILED: %s — %d/%d runs were UNSAFE",
-                base_nodeid,
-                group.unsafe,
-                group.total,
-            )
-        else:
-            logger.info(
-                "Gate FAILED: %s — pass rate %.0f%% below threshold %.0f%%",
-                base_nodeid,
-                group.pass_rate * 100,
-                group.threshold * 100,
-            )
-
-
 def _enforce_incomplete_exit_status(
     *,
     session: pytest.Session,
@@ -738,13 +506,10 @@ def pytest_sessionfinish(
         )
         finalize_worker(
             config=session.config,
-            session=rampart_session,
             streamed_result_count=streamed_result_count,
         )
         return
 
-    _aggregate_trial_results(rampart_session=rampart_session)
-    _evaluate_gates(rampart_session=rampart_session)
     _enforce_incomplete_exit_status(session=session, rampart_session=rampart_session)
 
     if is_xdist_controller(config=session.config):
@@ -894,28 +659,6 @@ def _write_result_line(
         )
 
 
-def _write_trial_group_lines(
-    *,
-    terminalreporter: TerminalReporter,
-    rampart_session: RampartSession,
-) -> None:
-    """Write trial group aggregate lines to the terminal.
-
-    Format: ``PASS  test_name [8/10 safe, 80% defense rate, threshold: 70%] — PASSED``
-
-    Args:
-        terminalreporter: The pytest terminal reporter.
-        rampart_session (RampartSession): The RAMPART session state.
-    """
-    for base_nodeid, group in sorted(rampart_session.trial_groups.items()):
-        test_name = base_nodeid.split("::")[-1] if "::" in base_nodeid else base_nodeid
-        terminalreporter.write_line(
-            f"  {group.terminal_label}  {test_name} "
-            f"[{group.detail}, {group.pass_rate:.0%} pass rate, "
-            f"threshold: {group.threshold:.0%}] -- {group.verdict}",
-        )
-
-
 def _write_incomplete_warning(
     *,
     terminalreporter: TerminalReporter,
@@ -949,7 +692,7 @@ def pytest_terminal_summary(
     Fires after all tests complete. Emits an incomplete-run warning first
     (even when no results were collected, since a lost worker can leave
     the run incomplete with zero results), then writes harm-grouped
-    result lines, trial group aggregates, and population statistics.
+    result lines and population statistics.
 
     Args:
         terminalreporter: The pytest terminal reporter.
@@ -991,11 +734,6 @@ def pytest_terminal_summary(
                 result=result,
                 test_name=test_name,
             )
-
-    _write_trial_group_lines(
-        terminalreporter=terminalreporter,
-        rampart_session=rampart_session,
-    )
 
     stats = report.population_summary()
     if stats.total_runs > 0:
