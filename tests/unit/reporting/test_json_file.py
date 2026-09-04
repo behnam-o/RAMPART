@@ -6,8 +6,11 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
+from uuid import UUID
 
 import pytest
 
@@ -391,6 +394,93 @@ class TestEmitAsync:
         assert category_results[0]["turns"][0]["response_metadata"] == {
             "page_url": "https://example.com/chat",
         }
+
+    async def test_same_timestamp_preserves_every_report_async(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        sink = JsonFileReportSink(output_dir=tmp_path)
+        fixed = datetime(2026, 8, 27, 12, 0, 0, 123456, tzinfo=UTC)
+
+        with patch("rampart.reporting.json_file.datetime") as clock:
+            clock.now.return_value = fixed
+            for run in range(3):
+                await sink.emit_async(report=TestRunReport(metadata={"run": run}))
+            clock.now.assert_called_with(UTC)
+
+        files = list(tmp_path.glob("run_report_*.json"))
+        assert len(files) == 3
+        assert {
+            json.loads(path.read_text(encoding="utf-8"))["metadata"]["run"]
+            for path in files
+        } == {0, 1, 2}
+
+        concise = tmp_path / "run_report_2026-08-27T12-00-00-123.json"
+        assert json.loads(concise.read_text(encoding="utf-8"))["metadata"] == {
+            "run": 0,
+        }
+        colliding_files = [path for path in files if path != concise]
+        assert len(colliding_files) == 2
+        for path in colliding_files:
+            assert path.name.startswith("run_report_2026-08-27T12-00-00-123_")
+            identifier = path.stem.rsplit("_", 1)[1]
+            assert len(identifier) == 32
+            assert UUID(hex=identifier).version == 4
+
+    async def test_existing_report_is_not_replaced_async(self, tmp_path: Path) -> None:
+        original = tmp_path / "run_report_2026-08-27T12-00-00-000.json"
+        original.write_text("keep me", encoding="utf-8")
+        sink = JsonFileReportSink(output_dir=tmp_path)
+        fixed = datetime(2026, 8, 27, 12, 0, 0, tzinfo=UTC)
+
+        with patch("rampart.reporting.json_file.datetime") as clock:
+            clock.now.return_value = fixed
+            await sink.emit_async(report=TestRunReport(metadata={"run": "new"}))
+
+        assert original.read_text(encoding="utf-8") == "keep me"
+        new_files = list(tmp_path.glob("run_report_2026-08-27T12-00-00-000_*.json"))
+        assert len(new_files) == 1
+        assert json.loads(new_files[0].read_text(encoding="utf-8"))["metadata"] == {
+            "run": "new",
+        }
+
+    async def test_uuid_collision_does_not_overwrite_existing_report_async(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        identifier = UUID("a3f18c92-654d-4b75-ad15-687d383d951b")
+        timestamp_file = tmp_path / "run_report_2026-08-27T12-00-00-000.json"
+        timestamp_file.write_text("keep timestamp", encoding="utf-8")
+        uuid_file = (
+            tmp_path / f"run_report_2026-08-27T12-00-00-000_{identifier.hex}.json"
+        )
+        uuid_file.write_text("keep uuid", encoding="utf-8")
+        sink = JsonFileReportSink(output_dir=tmp_path)
+        fixed = datetime(2026, 8, 27, 12, 0, 0, tzinfo=UTC)
+
+        with (
+            patch("rampart.reporting.json_file.datetime") as clock,
+            patch("rampart.reporting.json_file.uuid4", return_value=identifier),
+        ):
+            clock.now.return_value = fixed
+            with pytest.raises(FileExistsError, match=identifier.hex):
+                await sink.emit_async(report=TestRunReport())
+
+        assert timestamp_file.read_text(encoding="utf-8") == "keep timestamp"
+        assert uuid_file.read_text(encoding="utf-8") == "keep uuid"
+        assert set(tmp_path.glob("run_report_*.json")) == {timestamp_file, uuid_file}
+
+    async def test_serialization_failure_does_not_create_a_file_async(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        sink = JsonFileReportSink(output_dir=tmp_path)
+        report = TestRunReport(metadata={"bad": {("tuple", "key"): "value"}})
+
+        with pytest.raises(TypeError, match="keys must be"):
+            await sink.emit_async(report=report)
+
+        assert list(tmp_path.glob("run_report_*.json")) == []
 
 
 class TestReportMetadata:
